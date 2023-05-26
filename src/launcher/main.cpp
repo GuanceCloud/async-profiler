@@ -72,6 +72,7 @@ static const char USAGE_STRING[] =
     "  --reverse         generate stack-reversed FlameGraph / Call tree\n"
     "\n"
     "  --loop time       run profiler in a loop\n"
+    "  --ttl time        automatically shutdown profiler at time(absolute or relative) in loop (continuous profiling) model"
     "  --alloc bytes     allocation profiling interval in bytes\n"
     "  --live            build allocation profile from live objects only\n"
     "  --lock duration   lock profiling threshold in nanoseconds\n"
@@ -455,6 +456,9 @@ int main(int argc, const char** argv) {
         } else if (arg == "--timeout" || arg == "--loop") {
             params << "," << (arg.str() + 2) << "=" << args.next();
             if (action == "collect") action = "start";
+
+        } else if (arg == "--ttl") {
+            params << ",ttl=" << args.next();
 
         } else if (arg == "--fdtransfer") {
             char buf[64];

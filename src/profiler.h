@@ -79,6 +79,8 @@ class Profiler {
 
     time_t _start_time;
     time_t _stop_time;
+    bool _in_first_loop;
+    time_t _hung_time;
     int _epoch;
     u32 _gc_id;
     WaitableMutex _timer_lock;
@@ -163,6 +165,7 @@ class Profiler {
         _call_trace_storage(),
         _jfr(),
         _start_time(0),
+        _hung_time(0),
         _epoch(0),
         _gc_id(0),
         _timer_id(NULL),

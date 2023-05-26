@@ -80,6 +80,7 @@ static const Multiplier UNIVERSAL[] = {{'n', 1}, {'u', 1000}, {'m', 1000000}, {'
 //     chunktime=N      - duration of JFR chunk in seconds (default: 1 hour)
 //     timeout=TIME     - automatically stop profiler at TIME (absolute or relative)
 //     loop=TIME        - run profiler in a loop (continuous profiling)
+//     ttl=TIME         - automatically shutdown profiler at TIME(absolute or relative) in loop (continuous profiling) model
 //     interval=N       - sampling interval in ns (default: 10'000'000, i.e. 10 ms)
 //     jstackdepth=N    - maximum Java stack depth (default: 2048)
 //     safemode=BITS    - disable stack recovery techniques (default: 0, i.e. everything enabled)
@@ -228,6 +229,11 @@ Error Arguments::parse(const char* args) {
                 _loop = true;
                 if (value == NULL || (_timeout = parseTimeout(value)) == -1 || !_persistent) {
                     msg = "Invalid loop duration";
+                }
+
+            CASE("ttl")
+                if (value == NULL || (_ttl = parseTimeout(value)) == -1 || !_persistent) {
+                    msg = "Invalid ttl duration"
                 }
 
             CASE("alloc")
