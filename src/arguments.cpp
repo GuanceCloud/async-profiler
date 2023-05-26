@@ -233,7 +233,7 @@ Error Arguments::parse(const char* args) {
 
             CASE("ttl")
                 if (value == NULL || (_ttl = parseTimeout(value)) == -1 || !_persistent) {
-                    msg = "Invalid ttl duration"
+                    msg = "Invalid ttl duration";
                 }
 
             CASE("alloc")

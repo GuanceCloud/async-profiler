@@ -1662,7 +1662,7 @@ Error Profiler::restart(Arguments& args) {
 
     if (args._loop) {
         if (_hung_time > 0 && OS::micros() >= (u64)_hung_time * 1000000ULL) {
-            return Error::OK
+            return Error::OK;
         }
         _in_first_loop = false;
         args._file_num++;
