@@ -72,7 +72,7 @@ static const char USAGE_STRING[] =
     "  --reverse         generate stack-reversed FlameGraph / Call tree\n"
     "\n"
     "  --loop time       run profiler in a loop\n"
-    "  --ttl time        automatically shutdown profiler at time(absolute or relative) in loop (continuous profiling) model"
+    "  --ttl time        automatically shutdown profiler when <time> is up in the loop (continuous profiling) model\n"
     "  --alloc bytes     allocation profiling interval in bytes\n"
     "  --live            build allocation profile from live objects only\n"
     "  --lock duration   lock profiling threshold in nanoseconds\n"
