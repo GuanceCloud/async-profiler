@@ -35,6 +35,7 @@ usage() {
     echo "  --reverse         generate stack-reversed FlameGraph / Call tree"
     echo ""
     echo "  --loop time       run profiler in a loop"
+    echo "  --ttl time        automatically shutdown profiler at <time>(absolute or relative) when it's in loop (continuous profiling) model"
     echo "  --alloc bytes     allocation profiling interval in bytes"
     echo "  --live            build allocation profile from live objects only"
     echo "  --lock duration   lock profiling threshold in nanoseconds"
@@ -234,6 +235,10 @@ while [ $# -gt 0 ]; do
             if [ "$ACTION" = "collect" ]; then
                 ACTION="start"
             fi
+            PARAMS="$PARAMS,${1#--}=$2"
+            shift
+            ;;
+        --ttl)
             PARAMS="$PARAMS,${1#--}=$2"
             shift
             ;;

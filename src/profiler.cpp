@@ -1057,6 +1057,13 @@ Error Profiler::start(Arguments& args, bool reset) {
 
     if (args._timeout != 0 || args._output == OUTPUT_JFR) {
         _stop_time = addTimeout(_start_time, args._timeout);
+        if (_in_first_loop) {
+            if (args._ttl == 0) {
+                _hung_time = 0;
+            } else {
+                _hung_time = addTimeout(_start_time, args._ttl);
+            }
+        }
         startTimer();
     }
 
@@ -1086,6 +1093,7 @@ Error Profiler::stop() {
         return Error("Profiler is not active");
     }
 
+    _in_first_loop = false;
     uninstallTraps();
 
     if (_event_mask & EM_LOCK) lock_tracer.stop();
@@ -1500,6 +1508,7 @@ Error Profiler::runInternal(Arguments& args, std::ostream& out) {
     switch (args._action) {
         case ACTION_START:
         case ACTION_RESUME: {
+            _in_first_loop = true;
             Error error = start(args, args._action == ACTION_START);
             if (error) {
                 return error;
@@ -1619,6 +1628,10 @@ Error Profiler::restart(Arguments& args) {
     }
 
     if (args._loop) {
+        if (_hung_time > 0 && OS::micros() >= (u64)_hung_time * 1000000ULL) {
+            return Error::OK;
+        }
+        _in_first_loop = false;
         args._file_num++;
         return start(args, true);
     }
