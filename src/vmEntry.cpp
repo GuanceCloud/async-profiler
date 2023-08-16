@@ -314,7 +314,12 @@ void VM::loadAllMethodIDs(jvmtiEnv* jvmti, JNIEnv* jni) {
 }
 
 void VM::restartProfiler() {
-    Profiler::instance()->restart(_agent_args);
+    Error err = Profiler::instance()->restart(_agent_args);
+    if (err) {
+        Log::error("VM::restartProfiler fail: %s", err.message() == NULL ? "" : err.message());
+    } else {
+        Log::info("VM::restartProfiler success.");
+    }
 }
 
 void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {

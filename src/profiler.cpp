@@ -1039,12 +1039,14 @@ Error Profiler::start(Arguments& args, bool reset) {
         _alloc_engine = selectAllocEngine(args._alloc, args._live);
         error = _alloc_engine->start(args);
         if (error) {
+            Log::warn("unable to start alloc engine: %s", error.message());
             goto error2;
         }
     }
     if (_event_mask & EM_LOCK) {
         error = lock_tracer.start(args);
         if (error) {
+            Log::warn("unable to start lock tracer: %s", error.message());
             goto error3;
         }
     }
@@ -1486,6 +1488,7 @@ void Profiler::timerLoop(void* timer_id) {
         if (_timer_id != timer_id) return;
 
         if ((current_micros = OS::micros()) >= stop_micros) {
+            Log::info("stop_micros reached, restart profiler now.");
             VM::restartProfiler();
             return;
         }
@@ -1629,6 +1632,7 @@ Error Profiler::restart(Arguments& args) {
 
     if (args._loop) {
         if (_hung_time > 0 && OS::micros() >= (u64)_hung_time * 1000000ULL) {
+            Log::info("Time to live reached");
             return Error::OK;
         }
         _in_first_loop = false;
