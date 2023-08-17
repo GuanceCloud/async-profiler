@@ -31,6 +31,7 @@
 
 #include "fdtransfer.h"
 #include "../jattach/psutil.h"
+#include "../arguments.h"
 
 
 class FdTransferServer {
@@ -50,6 +51,7 @@ class FdTransferServer {
 
 int FdTransferServer::_server;
 int FdTransferServer::_peer;
+static char *_accept_timeout = NULL;
 
 bool FdTransferServer::bindServer(struct sockaddr_un *sun, socklen_t addrlen, int accept_timeout) {
     _server = socket(AF_UNIX, SOCK_SEQPACKET, 0);
@@ -86,7 +88,11 @@ bool FdTransferServer::bindServer(struct sockaddr_un *sun, socklen_t addrlen, in
 bool FdTransferServer::acceptPeer(int *peer_pid) {
     _peer = accept(_server, NULL, NULL);
     if (_peer == -1) {
-        perror("FdTransfer accept()");
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            fprintf(stderr, "[INFO] accept timeout, FdTransferServer exit now.");
+        } else {
+            perror("FdTransfer accept()");
+        }
         return false;
     }
 
@@ -301,8 +307,22 @@ static int single_pid_server(int pid, const char *path) {
         }
     }
 
-    if (!FdTransferServer::bindServer(&sun, addrlen, 10)) {
+    int accept_timeout_seconds = DEFAULT_ACCEPT_TIMEOUT;
+    if (_accept_timeout) {
+        int timeout = Arguments::parseTimeout(_accept_timeout);
+        if (timeout > 0) {
+            accept_timeout_seconds = timeout + DEFAULT_ACCEPT_TIMEOUT;
+        }
+    }
+    fprintf(stderr, "[INFO] set accept timeout to %d seconds\n", accept_timeout_seconds);
+
+    if (!FdTransferServer::bindServer(&sun, addrlen, accept_timeout_seconds)) {
         return 1;
+    }
+
+    if (0 != fork()) {
+        // Exit now, let our caller continue.
+        return 0;
     }
 
     if (!enter_ns(pid, "pid") == -1) {
@@ -310,12 +330,25 @@ static int single_pid_server(int pid, const char *path) {
         return 1;
     }
 
-    // CLONE_NEWPID affects children only - so we fork here.
-    if (0 == fork()) {
-        return FdTransferServer::acceptPeer(&nspid) && FdTransferServer::serveRequests(nspid) ? 0 : 1;
-    } else {
-        // Exit now, let our caller continue.
-        return 0;
+    // Infinitely wait for subsequent connection until timeout, this is necessary when use "--loop" option.
+    while (1) {
+        if (!FdTransferServer::acceptPeer(&nspid)) {
+            return 1;
+        }
+        // CLONE_NEWPID affects children only - so we fork here.
+        int child = fork();
+        if (-1 == child) {
+            perror("unable to fork");
+            return 1;
+        } else if (0 == child) {
+            return FdTransferServer::serveRequests(nspid) ? 0 : 1;
+        } else {
+            // Exit now, let our caller continue.
+            // return 0;
+            FdTransferServer::closePeer();
+            // Wait subprocess to exit.
+            RESTARTABLE(waitpid(child, NULL, 0));
+        }
     }
 }
 
@@ -370,7 +403,10 @@ static int path_server(const char *path) {
 
 int main(int argc, const char** argv) {
     int pid = 0;
-    if (argc == 3) {
+    if (argc >= 3) {
+        if (argc > 3) {
+            _accept_timeout = (char *)argv[3];
+        }
         pid = atoi(argv[2]);
     } else if (argc != 2) {
         fprintf(stderr, "Usage: %s <path> [<pid>]\n", argv[0]);

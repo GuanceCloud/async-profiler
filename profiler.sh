@@ -98,7 +98,11 @@ fdtransfer() {
     if [ "$USE_FDTRANSFER" = "true" ]; then
         FDTRANSFER_PATH="@async-profiler-$(od -An -N3 -i /dev/random | xargs)"
         PARAMS="$PARAMS,fdtransfer=$FDTRANSFER_PATH"
-        "$FDTRANSFER" "$FDTRANSFER_PATH" "$PID"
+        if [ -n "$ACCEPT_TIMEOUT" ]; then
+          "$FDTRANSFER" "$FDTRANSFER_PATH" "$PID" "$ACCEPT_TIMEOUT"
+        else
+          "$FDTRANSFER" "$FDTRANSFER_PATH" "$PID"
+        fi 
     fi
 }
 
@@ -140,6 +144,7 @@ FDTRANSFER_PATH=""
 PROFILER=$SCRIPT_DIR/build/libasyncProfiler.so
 ACTION="collect"
 DURATION="60"
+ACCEPT_TIMEOUT=""
 FILE=""
 USE_TMP="true"
 OUTPUT=""
@@ -235,6 +240,7 @@ while [ $# -gt 0 ]; do
             if [ "$ACTION" = "collect" ]; then
                 ACTION="start"
             fi
+            ACCEPT_TIMEOUT="$2"
             PARAMS="$PARAMS,${1#--}=$2"
             shift
             ;;
