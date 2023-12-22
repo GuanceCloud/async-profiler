@@ -47,6 +47,7 @@ ifeq ($(OS),Darwin)
     MERGE=false
   endif
 else
+  CFLAGS += -static 
   CXXFLAGS += -Wl,-z,defs
   ifeq ($(MERGE),true)
     CXXFLAGS += -fwhole-program
