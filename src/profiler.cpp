@@ -1652,8 +1652,6 @@ void Profiler::timerLoop(void* timer_id) {
         }
 
         if ((current_micros = OS::micros()) >= stop_micros) {
-            // Log::info("stop_micros reached, restart profiler now.");
-            // VM::restartProfiler();
             restart(_global_args);
             return;
         }
@@ -1794,6 +1792,7 @@ Error Profiler::restart(Arguments& args) {
     if (args._loop) {
         if (_hung_time > 0 && OS::micros() >= (u64)_hung_time * 1000000ULL) {
             Log::info("Time to live reached");
+            FdTransferClient::closePeer(); // close the fdtransfer connection
             return Error::OK;
         }
         _in_first_loop = false;

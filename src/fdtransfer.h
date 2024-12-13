@@ -13,8 +13,6 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#define DEFAULT_ACCEPT_TIMEOUT 30
-
 #define ARRAY_SIZE(arr)  (sizeof(arr) / sizeof(arr[0]))
 
 #define RESTARTABLE(call)  ({ ssize_t ret; while ((ret = call) < 0 && errno == EINTR); ret; })

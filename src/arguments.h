@@ -150,6 +150,7 @@ class Arguments {
     static long long hash(const char* arg);
     static Output detectOutputFormat(const char* file);
     static long parseUnits(const char* str, const Multiplier* multipliers);
+    static int parseTimeout(const char* str);
 
   public:
     Action _action;
@@ -257,7 +258,6 @@ class Arguments {
 
     const char* file();
 
-    static int parseTimeout(const char* str);
     bool hasTemporaryLog() const;
 
     bool hasOutputFile() const {

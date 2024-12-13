@@ -27,7 +27,6 @@
 
 int FdTransferServer::_server;
 int FdTransferServer::_peer;
-static char *_accept_timeout = NULL;
 
 bool FdTransferServer::bindServer(struct sockaddr_un *sun, socklen_t addrlen, int accept_timeout) {
     _server = socket(AF_UNIX, SOCK_SEQPACKET, 0);
@@ -282,23 +281,8 @@ bool FdTransferServer::runOnce(int pid, const char *path) {
         }
     }
 
-
-    int accept_timeout_seconds = DEFAULT_ACCEPT_TIMEOUT;
-    if (_accept_timeout) {
-        int timeout = Arguments::parseTimeout(_accept_timeout);
-        if (timeout > 0) {
-            accept_timeout_seconds = timeout + DEFAULT_ACCEPT_TIMEOUT;
-        }
-    }
-    fprintf(stderr, "[INFO] set accept timeout to %d seconds\n", accept_timeout_seconds);
-
-    if (!bindServer(&sun, addrlen, accept_timeout_seconds)) {
+    if (!bindServer(&sun, addrlen, 30)) {
         return false;
-    }
-
-    if (0 != fork()) {
-        // Exit now, let our caller continue.
-        return 0;
     }
 
     if (!enter_ns(pid, "pid") == -1) {
@@ -306,25 +290,12 @@ bool FdTransferServer::runOnce(int pid, const char *path) {
         return false;
     }
 
-    // Infinitely wait for subsequent connection until timeout, this is necessary when use "--loop" option.
-    while (1) {
-        if (!acceptPeer(&nspid)) {
-            return 1;
-        }
-        // CLONE_NEWPID affects children only - so we fork here.
-        int child = fork();
-        if (-1 == child) {
-            perror("unable to fork");
-            return 1;
-        } else if (0 == child) {
-            return serveRequests(nspid);
-        } else {
-            // Exit now, let our caller continue.
-            // return 0;
-            FdTransferServer::closePeer();
-            // Wait subprocess to exit.
-            RESTARTABLE(waitpid(child, NULL, 0));
-        }
+    // CLONE_NEWPID affects children only - so we fork here.
+    if (fork() == 0) {
+        return acceptPeer(&nspid) && serveRequests(nspid);
+    } else {
+        // Exit now, let our caller continue.
+        return true;
     }
 }
 
@@ -376,27 +347,5 @@ bool FdTransferServer::runLoop(const char *path) {
         }
     }
 }
-
-// int main(int argc, const char** argv) {
-//     int pid = 0;
-//     if (argc >= 3) {
-//         if (argc > 3) {
-//             _accept_timeout = (char *)argv[3];
-//         }
-//         pid = atoi(argv[2]);
-//     } else if (argc != 2) {
-//         fprintf(stderr, "Usage: %s <path> [<pid>]\n", argv[0]);
-//         return 1;
-//     }
-
-//     // 2 modes:
-//     // pid is not given - bind on a path and accept requests forever, from any PID, until being killed.
-//     // pid is given     - bind on an path for that PID, accept requests only from that PID until the single connection is closed.
-//     if (pid != 0) {
-//         return single_pid_server(pid, argv[1]);
-//     } else {
-//         return path_server(argv[1]);
-//     }
-// }
 
 #endif // __linux__
