@@ -1,17 +1,6 @@
 /*
- * Copyright 2018 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <map>
@@ -39,7 +28,7 @@
 #include "vmStructs.h"
 
 
-INCBIN(JFR_SYNC_CLASS, "one/profiler/JfrSync.class")
+INCBIN(JFR_SYNC_CLASS, "src/helper/one/profiler/JfrSync.class")
 
 static void JNICALL JfrSync_stopProfiler(JNIEnv* env, jclass cls) {
     Profiler::instance()->stop();
@@ -68,7 +57,7 @@ static jmethodID _stop_method;
 static jmethodID _box_method;
 
 static const char* const SETTING_RING[] = {NULL, "kernel", "user"};
-static const char* const SETTING_CSTACK[] = {NULL, "no", "fp", "dwarf", "lbr"};
+static const char* const SETTING_CSTACK[] = {NULL, "no", "fp", "dwarf", "lbr", "vm"};
 static const char* const SETTING_CLOCK[] = {NULL, "tsc", "monotonic"};
 
 
@@ -145,21 +134,6 @@ class Lookup {
     Dictionary _symbols;
 
   private:
-    void cutArguments(char* func) {
-        char* p = strrchr(func, ')');
-        if (p == NULL) return;
-
-        int balance = 1;
-        while (--p > func) {
-            if (*p == '(' && --balance == 0) {
-                *p = 0;
-                return;
-            } else if (*p == ')') {
-                balance++;
-            }
-        }
-    }
-
     void fillNativeMethodInfo(MethodInfo* mi, const char* name, const char* lib_name) {
         if (lib_name == NULL) {
             mi->_class = _classes->lookup("");
@@ -174,9 +148,8 @@ class Lookup {
         mi->_line_number_table = NULL;
 
         if (name[0] == '_' && name[1] == 'Z') {
-            char* demangled = Demangle::demangle(name);
+            char* demangled = Demangle::demangle(name, false);
             if (demangled != NULL) {
-                cutArguments(demangled);
                 mi->_name = _symbols.lookup(demangled);
                 mi->_sig = _symbols.lookup("()L;");
                 mi->_type = FRAME_CPP;
@@ -197,7 +170,15 @@ class Lookup {
         }
     }
 
-    void fillJavaMethodInfo(MethodInfo* mi, jmethodID method, bool first_time) {
+    bool fillJavaMethodInfo(MethodInfo* mi, jmethodID method, bool first_time) {
+        if (VMStructs::hasMethodStructs()) {
+            // Workaround for JDK-8313816
+            VMMethod* vm_method = VMMethod::fromMethodID(method);
+            if (vm_method == NULL || vm_method->id() == NULL) {
+                return false;
+            }
+        }
+
         jvmtiEnv* jvmti = VM::jvmti();
 
         jclass method_class;
@@ -231,6 +212,7 @@ class Lookup {
         }
 
         mi->_type = FRAME_INTERPRETED;
+        return true;
     }
 
     void fillJavaClassInfo(MethodInfo* mi, u32 class_id) {
@@ -262,7 +244,9 @@ class Lookup {
             if (method == NULL) {
                 fillNativeMethodInfo(mi, "unknown", NULL);
             } else if (frame.bci > BCI_NATIVE_FRAME) {
-                fillJavaMethodInfo(mi, method, first_time);
+                if (!fillJavaMethodInfo(mi, method, first_time)) {
+                    fillNativeMethodInfo(mi, "stale_jmethodID", NULL);
+                }
             } else if (frame.bci == BCI_NATIVE_FRAME) {
                 const char* name = (const char*)method;
                 fillNativeMethodInfo(mi, name, Profiler::instance()->getLibraryName(name));
@@ -455,7 +439,6 @@ class Recording {
     u64 _chunk_size;
     u64 _chunk_time;
 
-    int _tid;
     int _available_processors;
     int _recorded_lib_count;
 
@@ -481,8 +464,7 @@ class Recording {
         _chunk_size = args._chunk_size <= 0 ? MAX_JLONG : (args._chunk_size < 262144 ? 262144 : args._chunk_size);
         _chunk_time = args._chunk_time <= 0 ? MAX_JLONG : (args._chunk_time < 5 ? 5 : args._chunk_time) * 1000000ULL;
 
-        _tid = OS::threadId();
-        VM::jvmti()->GetAvailableProcessors(&_available_processors);
+        _available_processors = OS::getCpuCount();
 
         writeHeader(_buf);
         writeMetadata(_buf);
@@ -698,6 +680,20 @@ class Recording {
         return true;
     }
 
+    const char* getFeaturesString(char* str, size_t size, StackWalkFeatures f) {
+        snprintf(str, size, "%s %s %s %s %s %s %s %s %s",
+                 f.unknown_java  ? "unknown_java"  : "-",
+                 f.unwind_stub   ? "unwind_stub"   : "-",
+                 f.unwind_comp   ? "unwind_comp"   : "-",
+                 f.unwind_native ? "unwind_native" : "-",
+                 f.java_anchor   ? "java_anchor"   : "-",
+                 f.gc_traces     ? "gc_traces"     : "-",
+                 f.probe_sp      ? "probesp"       : "-",
+                 f.vtable_target ? "vtable"        : "-",
+                 f.comp_task     ? "comptask"      : "-");
+        return str;
+    }
+
     void flush(Buffer* buf) {
         ssize_t result = write(_fd, buf->data(), buf->offset());
         if (result > 0) {
@@ -763,8 +759,6 @@ class Recording {
         int start = buf->skip(1);
         buf->put8(T_ACTIVE_RECORDING);
         buf->putVar64(_start_ticks);
-        buf->putVar32(0);
-        buf->putVar32(_tid);
         buf->putVar32(1);
         buf->putUtf8("async-profiler " PROFILER_VERSION);
         buf->putUtf8("async-profiler.jfr");
@@ -787,10 +781,12 @@ class Recording {
         writeListSetting(buf, T_ACTIVE_RECORDING, "include", args._buf, args._include);
         writeListSetting(buf, T_ACTIVE_RECORDING, "exclude", args._buf, args._exclude);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "jstackdepth", args._jstackdepth);
-        writeIntSetting(buf, T_ACTIVE_RECORDING, "safemode", args._safe_mode);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "jfropts", args._jfr_options);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "chunksize", args._chunk_size);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "chunktime", args._chunk_time);
+
+        char str[256];
+        writeStringSetting(buf, T_ACTIVE_RECORDING, "features", getFeaturesString(str, sizeof(str), args._features));
 
         writeBoolSetting(buf, T_EXECUTION_SAMPLE, "enabled", args._event != NULL);
         if (args._event != NULL) {
@@ -812,7 +808,7 @@ class Recording {
             writeIntSetting(buf, T_MONITOR_ENTER, "lock", args._lock);
         }
 
-        writeBoolSetting(buf, T_ACTIVE_RECORDING, "debugSymbols", VMStructs::libjvm()->hasDebugSymbols());
+        writeBoolSetting(buf, T_ACTIVE_RECORDING, "debugSymbols", VM::loaded() && VMStructs::libjvm()->hasDebugSymbols());
         writeBoolSetting(buf, T_ACTIVE_RECORDING, "kernelSymbols", Symbols::haveKernelSymbols());
     }
 
@@ -821,9 +817,6 @@ class Recording {
         int start = buf->skip(5);
         buf->put8(T_ACTIVE_SETTING);
         buf->putVar64(_start_ticks);
-        buf->putVar32(0);
-        buf->putVar32(_tid);
-        buf->putVar32(0);
         buf->putVar32(category);
         buf->putUtf8(key);
         buf->putUtf8(value);
@@ -836,7 +829,7 @@ class Recording {
 
     void writeIntSetting(Buffer* buf, int category, const char* key, long long value) {
         char str[32];
-        sprintf(str, "%lld", value);
+        snprintf(str, sizeof(str), "%lld", value);
         writeStringSetting(buf, category, key, str);
     }
 
@@ -875,7 +868,7 @@ class Recording {
     }
 
     void writeJvmInfo(Buffer* buf) {
-        if (_agent_properties == NULL && !parseAgentProperties()) {
+        if (_agent_properties == NULL && !(VM::loaded() && parseAgentProperties())) {
             return;
         }
 
@@ -907,7 +900,7 @@ class Recording {
         jvmtiEnv* jvmti = VM::jvmti();
         jint count;
         char** keys;
-        if (jvmti->GetSystemProperties(&count, &keys) != 0) {
+        if (!VM::loaded() || jvmti->GetSystemProperties(&count, &keys) != 0) {
             return;
         }
 
@@ -1001,7 +994,6 @@ class Recording {
     }
 
     void writeThreads(Buffer* buf) {
-        addThread(_tid);
         std::vector<int> threads;
         _thread_set.collect(threads);
         _thread_set.clear();
@@ -1022,7 +1014,7 @@ class Recording {
                 thread_name = it->second.c_str();
                 thread_id = thread_ids[threads[i]];
             } else {
-                sprintf(name_buf, "[tid=%d]", threads[i]);
+                snprintf(name_buf, sizeof(name_buf), "[tid=%d]", threads[i]);
                 thread_name = name_buf;
                 thread_id = 0;
             }
@@ -1223,6 +1215,15 @@ class Recording {
         buf->put8(start, buf->offset() - start);
     }
 
+    void recordWindow(Buffer* buf, int tid, ProfilingWindow* event) {
+        int start = buf->skip(1);
+        buf->put8(T_WINDOW);
+        buf->putVar64(event->_start_time);
+        buf->putVar64(event->_end_time - event->_start_time);
+        buf->putVar32(tid);
+        buf->put8(start, buf->offset() - start);
+    }
+
     void recordCpuLoad(Buffer* buf, float proc_user, float proc_system, float machine_total) {
         int start = buf->skip(1);
         buf->put8(T_CPU_LOAD);
@@ -1298,8 +1299,6 @@ Error FlightRecorder::start(Arguments& args, bool reset) {
         free(filename_tmp);
     }
 
-    VM::jvmti()->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_GARBAGE_COLLECTION_FINISH, NULL);
-
     _rec = new Recording(fd, master_recording_file, args);
     _rec_lock.unlock();
     return Error::OK;
@@ -1312,8 +1311,6 @@ void FlightRecorder::stop() {
         if (_rec->hasMasterRecording()) {
             stopMasterRecording();
         }
-
-        VM::jvmti()->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_GARBAGE_COLLECTION_FINISH, NULL);
 
         delete _rec;
         _rec = NULL;
@@ -1442,6 +1439,9 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
                 break;
             case PARK_SAMPLE:
                 _rec->recordThreadPark(buf, tid, call_trace_id, (LockEvent*)event);
+                break;
+            case PROFILING_WINDOW:
+                _rec->recordWindow(buf, tid, (ProfilingWindow*)event);
                 break;
         }
         _rec->flushIfNeeded(buf);

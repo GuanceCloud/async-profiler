@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <cxxabi.h>
@@ -112,7 +101,22 @@ char* Demangle::demangleRust(const char* s, const char* e) {
     return result;
 }
 
-char* Demangle::demangle(const char* s) {
+void Demangle::cutArguments(char* s) {
+    char* p = strrchr(s, ')');
+    if (p == NULL) return;
+
+    int balance = 1;
+    while (--p > s) {
+        if (*p == '(' && --balance == 0) {
+            *p = 0;
+            return;
+        } else if (*p == ')') {
+            balance++;
+        }
+    }
+}
+
+char* Demangle::demangle(const char* s, bool full_signature) {
     // Check if the mangled symbol ends with a Rust hash "17h<hex>E"
     const char* e = strrchr(s, 'E');
     if (e != NULL && e - s > 22 && e[-19] == '1' && e[-18] == '7' && e[-17] == 'h') {
@@ -123,5 +127,9 @@ char* Demangle::demangle(const char* s) {
         }
     }
 
-    return demangleCpp(s);
+    char* result = demangleCpp(s);
+    if (result != NULL && !full_signature) {
+        cutArguments(result);
+    }
+    return result;
 }

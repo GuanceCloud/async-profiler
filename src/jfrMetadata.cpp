@@ -1,17 +1,6 @@
 /*
- * Copyright 2020 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "jfrMetadata.h"
@@ -150,8 +139,6 @@ JfrMetadata::JfrMetadata() : Element("root") {
             << (type("jdk.ActiveRecording", T_ACTIVE_RECORDING, "Async-profiler Recording")
                 << category("Flight Recorder")
                 << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
-                << field("duration", T_LONG, "Duration", F_DURATION_TICKS)
-                << field("eventThread", T_THREAD, "Event Thread", F_CPOOL)
                 << field("id", T_LONG, "Id")
                 << field("name", T_STRING, "Name")
                 << field("destination", T_STRING, "Destination")
@@ -163,9 +150,6 @@ JfrMetadata::JfrMetadata() : Element("root") {
             << (type("jdk.ActiveSetting", T_ACTIVE_SETTING, "Async-profiler Setting")
                 << category("Flight Recorder")
                 << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
-                << field("duration", T_LONG, "Duration", F_DURATION_TICKS)
-                << field("eventThread", T_THREAD, "Event Thread", F_CPOOL)
-                << field("stackTrace", T_STACK_TRACE, "Stack Trace", F_CPOOL)
                 << field("id", T_LONG, "Event Id")
                 << field("name", T_STRING, "Setting Name")
                 << field("value", T_STRING, "Setting Value"))
@@ -222,6 +206,12 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("level", T_LOG_LEVEL, "Level", F_CPOOL)
                 << field("message", T_STRING, "Message"))
 
+            << (type("profiler.Window", T_WINDOW, "Profiling Window")
+                << category("Profiler")
+                << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
+                << field("duration", T_LONG, "Duration", F_DURATION_TICKS)
+                << field("eventThread", T_THREAD, "Event Thread", F_CPOOL))
+
             << (type("profiler.LiveObject", T_LIVE_OBJECT, "Live Object")
                 << category("Java Application")
                 << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
@@ -236,6 +226,8 @@ JfrMetadata::JfrMetadata() : Element("root") {
 
             << (type("jdk.jfr.Category", T_CATEGORY, NULL)
                 << field("value", T_STRING, NULL, F_ARRAY))
+
+            << type("jdk.jfr.ContentType", T_CONTENT_TYPE, "Content Type")
 
             << (type("jdk.jfr.Timestamp", T_TIMESTAMP, "Timestamp")
                 << field("value", T_STRING))

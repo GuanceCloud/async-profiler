@@ -1,17 +1,6 @@
 /*
- * Copyright 2020 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 import one.jfr.ClassRef;
@@ -33,20 +22,26 @@ public class jfr2flame {
 
     private final JfrReader jfr;
     private final Arguments args;
-    private final Dictionary<String> methodNames = new Dictionary<>();
 
     public jfr2flame(JfrReader jfr, Arguments args) {
         this.jfr = jfr;
         this.args = args;
     }
 
-    public void convert(final FlameGraph fg) throws IOException {
-        EventAggregator agg = new EventAggregator(args.threads, args.total);
-
+    public void convert(FlameGraph fg) throws IOException {
         Class<? extends Event> eventClass =
                 args.live ? LiveObject.class :
                         args.alloc ? AllocationSample.class :
                                 args.lock ? ContendedLock.class : ExecutionSample.class;
+
+        jfr.stopAtNewChunk = true;
+        while (!jfr.eof()) {
+            convertChunk(fg, eventClass);
+        }
+    }
+
+    public void convertChunk(final FlameGraph fg, Class<? extends Event> eventClass) throws IOException {
+        EventAggregator agg = new EventAggregator(args.threads, args.total);
 
         long threadStates = 0;
         if (args.state != null) {
@@ -67,9 +62,11 @@ public class jfr2flame {
             }
         }
 
+        final Dictionary<String> methodNames = new Dictionary<>();
+        final Classifier classifier = new Classifier(methodNames);
+
         final double ticksToNanos = 1e9 / jfr.ticksPerSec;
         final boolean scale = args.total && args.lock && ticksToNanos != 1.0;
-        final Classifier classifier = new Classifier(methodNames);
 
         // Don't use lambda for faster startup
         agg.forEach(new EventAggregator.Visitor() {
@@ -94,7 +91,7 @@ public class jfr2flame {
                         trace[--idx] = classFrame;
                     }
                     for (int i = 0; i < methods.length; i++) {
-                        String methodName = getMethodName(methods[i], types[i]);
+                        String methodName = getMethodName(methodNames, methods[i], types[i]);
                         int location;
                         if (args.lines && (location = locations[i] >>> 16) != 0) {
                             methodName += ":" + location;
@@ -114,7 +111,8 @@ public class jfr2flame {
 
     private String getThreadFrame(int tid) {
         String threadName = jfr.threads.get(tid);
-        return threadName == null ? "[tid=" + tid + ']' : '[' + threadName + " tid=" + tid + ']';
+        return threadName == null ? "[tid=" + tid + ']' :
+                threadName.startsWith("[tid=") ? threadName : '[' + threadName + " tid=" + tid + ']';
     }
 
     private String getClassFrame(Event event) {
@@ -151,7 +149,7 @@ public class jfr2flame {
         return sb.append(suffix).toString();
     }
 
-    private String getMethodName(long methodId, byte methodType) {
+    private String getMethodName(Dictionary<String> methodNames, long methodId, byte methodType) {
         String result = methodNames.get(methodId);
         if (result != null) {
             return result;
@@ -210,6 +208,22 @@ public class jfr2flame {
             }
         }
 
+        if (args.norm) {
+            for (int i = end - 2; i > start; i--) {
+                if (symbol[i] == '/' || symbol[i] == '.') {
+                    if (symbol[i + 1] >= '0' && symbol[i + 1] <= '9') {
+                        end = i;
+                        if (i > start + 19 && symbol[i - 19] == '+' && symbol[i - 18] == '0') {
+                            // Original JFR transforms lambda names to something like
+                            // pkg.ClassName$$Lambda+0x00007f8177090218/543846639
+                            end = i - 19;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
         if (args.simple) {
             for (int i = end - 2; i >= start; i--) {
                 if (symbol[i] == '/' && (symbol[i + 1] < '0' || symbol[i + 1] > '9')) {
@@ -251,6 +265,7 @@ public class jfr2flame {
             System.out.println("  --bci         Show bytecode indices");
             System.out.println("  --simple      Simple class names instead of FQN");
             System.out.println("  --dot         Dotted class names");
+            System.out.println("  --norm        Normalize names of hidden classes / lambdas");
             System.out.println("  --from TIME   Start time in ms (absolute or relative)");
             System.out.println("  --to TIME     End time in ms (absolute or relative)");
             System.out.println("  --collapsed   Use collapsed stacks output format");

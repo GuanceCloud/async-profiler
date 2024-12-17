@@ -1,17 +1,6 @@
 /*
- * Copyright 2016 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #ifndef _PROFILER_H
@@ -92,7 +81,7 @@ class Profiler {
     SpinLock _locks[CONCURRENCY_LEVEL];
     CallTraceBuffer* _calltrace_buffer[CONCURRENCY_LEVEL];
     int _max_stack_depth;
-    int _safe_mode;
+    StackWalkFeatures _features;
     CStack _cstack;
     bool _add_event_frame;
     bool _add_thread_frame;
@@ -123,7 +112,7 @@ class Profiler {
 
     const char* asgctError(int code);
     u32 getLockIndex(int tid);
-    bool isAddressInCode(uintptr_t addr);
+    jmethodID getCurrentCompileTask();
     int getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, StackContext* java_ctx);
     int getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth, StackContext* java_ctx);
     int getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int start_depth, int max_depth);
@@ -145,7 +134,15 @@ class Profiler {
     void startTimer();
     void stopTimer();
     void timerLoop(void* timer_id);
-    static void timerThreadEntry(jvmtiEnv* jvmti, JNIEnv* jni, void* arg);
+
+    static void jvmtiTimerEntry(jvmtiEnv* jvmti, JNIEnv* jni, void* arg) {
+        instance()->timerLoop(arg);
+    }
+
+    static void* pthreadTimerEntry(void* arg) {
+        instance()->timerLoop(arg);
+        return NULL;
+    }
 
     void lockAll();
     void unlockAll();
@@ -170,7 +167,6 @@ class Profiler {
         _gc_id(0),
         _timer_id(NULL),
         _max_stack_depth(0),
-        _safe_mode(0),
         _thread_events_state(JVMTI_DISABLE),
         _stubs_lock(),
         _runtime_stubs("[stubs]"),
@@ -193,6 +189,7 @@ class Profiler {
 
     Dictionary* classMap() { return &_class_map; }
     ThreadFilter* threadFilter() { return &_thread_filter; }
+    CodeCacheArray* nativeLibs() { return &_native_libs; }
 
     Error run(Arguments& args);
     Error runInternal(Arguments& args, std::ostream& out);
@@ -200,7 +197,7 @@ class Profiler {
     void shutdown(Arguments& args);
     Error check(Arguments& args);
     Error start(Arguments& args, bool reset);
-    Error stop();
+    Error stop(bool restart = false);
     Error flushJfr();
     Error dump(std::ostream& out, Arguments& args);
     void printUsedMemory(std::ostream& out);
@@ -209,6 +206,7 @@ class Profiler {
     u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id);
+    void recordEventOnly(EventType event_type, Event* event);
     void writeLog(LogLevel level, const char* message);
     void writeLog(LogLevel level, const char* message, size_t len);
 
@@ -219,9 +217,12 @@ class Profiler {
     CodeCache* findLibraryByName(const char* lib_name);
     CodeCache* findLibraryByAddress(const void* address);
     const char* findNativeMethod(const void* address);
+    CodeBlob* findRuntimeStub(const void* address);
+    bool isAddressInCode(const void* pc);
 
     void trapHandler(int signo, siginfo_t* siginfo, void* ucontext);
     static void segvHandler(int signo, siginfo_t* siginfo, void* ucontext);
+    static void wakeupHandler(int signo);
     static void setupSignalHandlers();
 
     // CompiledMethodLoad is also needed to enable DebugNonSafepoints info by default

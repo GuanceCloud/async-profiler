@@ -1,17 +1,6 @@
 /*
- * Copyright 2017 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <limits.h>
@@ -23,6 +12,9 @@
 #include <unistd.h>
 #include "arguments.h"
 
+
+// Arguments of the last start/resume command; reused for shutdown and restart
+Arguments _global_args;
 
 // Predefined value that denotes successful operation
 const Error Error::OK(NULL);
@@ -80,9 +72,11 @@ static const Multiplier UNIVERSAL[] = {{'n', 1}, {'u', 1000}, {'m', 1000000}, {'
 //     chunktime=N      - duration of JFR chunk in seconds (default: 1 hour)
 //     timeout=TIME     - automatically stop profiler at TIME (absolute or relative)
 //     loop=TIME        - run profiler in a loop (continuous profiling)
-//     ttl=TIME         - automatically shutdown profiler at TIME(absolute or relative) in loop (continuous profiling) model
+//     ttl=TIME         - total duration the profiler will run, which is useful in the loop (continuous profiling) model
 //     interval=N       - sampling interval in ns (default: 10'000'000, i.e. 10 ms)
 //     jstackdepth=N    - maximum Java stack depth (default: 2048)
+//     signal=N         - use alternative signal for cpu or wall clock profiling
+//     features=LIST    - advanced stack trace features (vtable, comptask)"
 //     safemode=BITS    - disable stack recovery techniques (default: 0, i.e. everything enabled)
 //     file=FILENAME    - output file name for dumping
 //     log=FILENAME     - log warnings and errors to the given dedicated stream
@@ -92,13 +86,14 @@ static const Multiplier UNIVERSAL[] = {{'n', 1}, {'u', 1000}, {'m', 1000000}, {'
 //     threads          - profile different threads separately
 //     sched            - group threads by scheduling policy
 //     cstack=MODE      - how to collect C stack frames in addition to Java stack
-//                        MODE is 'fp' (Frame Pointer), 'dwarf', 'lbr' (Last Branch Record) or 'no'
+//                        MODE is 'fp', 'dwarf', 'lbr', 'vm' or 'no'
 //     clock=SOURCE     - clock source for JFR timestamps: 'tsc' or 'monotonic'
 //     allkernel        - include only kernel-mode events
 //     alluser          - include only user-mode events
 //     fdtransfer       - use fdtransfer to pass fds to the profiler
 //     simple           - simple class names instead of FQN
 //     dot              - dotted class names
+//     norm             - normalize names of hidden classes / lambdas
 //     sig              - print method signatures
 //     ann              - annotate Java methods
 //     lib              - prepend library names
@@ -221,18 +216,18 @@ Error Arguments::parse(const char* args) {
                 }
 
             CASE("timeout")
-                if (value == NULL || (_timeout = parseTimeout(value)) == -1 || !_persistent) {
+                if (value == NULL || (_timeout = parseTimeout(value)) == -1) {
                     msg = "Invalid timeout";
                 }
 
             CASE("loop")
                 _loop = true;
-                if (value == NULL || (_timeout = parseTimeout(value)) == -1 || !_persistent) {
+                if (value == NULL || (_timeout = parseTimeout(value)) == -1) {
                     msg = "Invalid loop duration";
                 }
 
             CASE("ttl")
-                if (value == NULL || (_ttl = parseTimeout(value)) == -1 || !_persistent) {
+                if (value == NULL || (_ttl = parseTimeout(value)) == -1) {
                     msg = "Invalid ttl duration";
                 }
 
@@ -255,8 +250,31 @@ Error Arguments::parse(const char* args) {
                     msg = "jstackdepth must be > 0";
                 }
 
-            CASE("safemode")
-                _safe_mode = value == NULL ? INT_MAX : (int)strtol(value, NULL, 0);
+            CASE("signal")
+                if (value == NULL || (_signal = atoi(value)) <= 0) {
+                    msg = "signal must be > 0";
+                } else if ((value = strchr(value, '/')) != NULL) {
+                    // Two signals were specified: one for CPU profiling, another for wall clock
+                    _signal |= atoi(value + 1) << 8;
+                }
+
+            CASE("features")
+                if (value != NULL) {
+                    if (strstr(value, "probesp"))  _features.probe_sp = 1;
+                    if (strstr(value, "vtable"))   _features.vtable_target = 1;
+                    if (strstr(value, "comptask")) _features.comp_task = 1;
+                }
+
+            CASE("safemode") {
+                // Left for compatibility purpose; will be eventually migrated to 'features'
+                int bits = value == NULL ? INT_MAX : (int)strtol(value, NULL, 0);
+                _features.unknown_java  = (bits & 1) ? 0 : 1;
+                _features.unwind_stub   = (bits & 2) ? 0 : 1;
+                _features.unwind_comp   = (bits & 4) ? 0 : 1;
+                _features.unwind_native = (bits & 8) ? 0 : 1;
+                _features.java_anchor   = (bits & 16) ? 0 : 1;
+                _features.gc_traces     = (bits & 32) ? 0 : 1;
+            }
 
             CASE("file")
                 if (value == NULL || value[0] == 0) {
@@ -315,14 +333,12 @@ Error Arguments::parse(const char* args) {
 
             CASE("cstack")
                 if (value != NULL) {
-                    if (value[0] == 'n') {
-                        _cstack = CSTACK_NO;
-                    } else if (value[0] == 'd') {
-                        _cstack = CSTACK_DWARF;
-                    } else if (value[0] == 'l') {
-                        _cstack = CSTACK_LBR;
-                    } else {
-                        _cstack = CSTACK_FP;
+                    switch (value[0]) {
+                        case 'n': _cstack = CSTACK_NO;    break;
+                        case 'd': _cstack = CSTACK_DWARF; break;
+                        case 'l': _cstack = CSTACK_LBR;   break;
+                        case 'v': _cstack = CSTACK_VM;    break;
+                        default:  _cstack = CSTACK_FP;
                     }
                 }
 
@@ -341,6 +357,9 @@ Error Arguments::parse(const char* args) {
 
             CASE("dot")
                 _style |= STYLE_DOTTED;
+
+            CASE("norm")
+                _style |= STYLE_NORMALIZE;
 
             CASE("sig")
                 _style |= STYLE_SIGNATURES;
@@ -405,6 +424,11 @@ const char* Arguments::file() {
         return expandFilePattern(_file);
     }
     return _file;
+}
+
+// Returns true if the log file is a temporary file of asprof launcher
+bool Arguments::hasTemporaryLog() const {
+    return _log != NULL && strncmp(_log, "/tmp/asprof-log.", 16) == 0;
 }
 
 // The linked list of string offsets is embedded right into _buf array
@@ -535,8 +559,10 @@ Arguments::~Arguments() {
     if (!_shared) free(_buf);
 }
 
-void Arguments::save(Arguments& other) {
-    if (!_shared) free(_buf);
-    *this = other;
-    other._shared = true;
+void Arguments::save() {
+    if (this != &_global_args) {
+        free(_global_args._buf);
+        _global_args = *this;
+        _shared = true;
+    }
 }

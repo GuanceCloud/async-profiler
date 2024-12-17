@@ -1,30 +1,12 @@
 /*
- * Copyright 2016 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #ifndef _VMENTRY_H
 #define _VMENTRY_H
 
 #include <jvmti.h>
-
-
-#ifdef __clang__
-#  define DLLEXPORT __attribute__((visibility("default")))
-#else
-#  define DLLEXPORT __attribute__((visibility("default"),externally_visible))
-#endif
 
 
 enum FrameTypeId {
@@ -123,13 +105,10 @@ class VM {
 
     static void ready();
     static void applyPatch(char* func, const char* patch, const char* end_patch);
-    static void* getLibraryHandle(const char* name);
     static void loadMethodIDs(jvmtiEnv* jvmti, JNIEnv* jni, jclass klass);
     static void loadAllMethodIDs(jvmtiEnv* jvmti, JNIEnv* jni);
 
   public:
-    static void* _libjvm;
-    static void* _libjava;
     static AsyncGetCallTrace _asyncGetCallTrace;
     static JVM_GetManagement _getManagement;
     static JVM_MemoryFunc _totalMemory;
@@ -137,7 +116,9 @@ class VM {
 
     static bool init(JavaVM* vm, bool attach);
 
-    static void restartProfiler();
+    static bool loaded() {
+        return _jvmti != NULL;
+    }
 
     static jvmtiEnv* jvmti() {
         return _jvmti;

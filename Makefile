@@ -1,4 +1,4 @@
-PROFILER_VERSION=2.10
+PROFILER_VERSION=3.0
 
 PACKAGE_NAME=async-profiler-$(PROFILER_VERSION)-$(OS_TAG)-$(ARCH_TAG)
 PACKAGE_DIR=/tmp/$(PACKAGE_NAME)
@@ -16,7 +16,7 @@ MERGE=true
 
 JAVAC=$(JAVA_HOME)/bin/javac
 JAR=$(JAVA_HOME)/bin/jar
-JAVA_TARGET=7
+JAVA_TARGET=8
 JAVAC_OPTIONS=--release $(JAVA_TARGET) -Xlint:-options
 
 SOURCES := $(wildcard src/*.cpp)
@@ -45,7 +45,8 @@ ifeq ($(OS),Darwin)
     MERGE=false
   endif
 else
-  CXXFLAGS += -Wl,-z,defs
+  CFLAGS += -static 
+  CXXFLAGS += -Wl,-z,defs -Wl,-rpath=/app/datakit-profiler/build -Wl,-rpath=/app/async-profiler/build
   ifeq ($(MERGE),true)
     CXXFLAGS += -fwhole-program
   endif
@@ -70,29 +71,29 @@ else
     else
       ARCH_TAG=arm32
     endif
+  else ifeq ($(findstring aarch64,$(ARCH)),aarch64)
+    ARCH_TAG=arm64
+  else ifeq ($(ARCH),ppc64le)
+    ARCH_TAG=ppc64le
+  else ifeq ($(ARCH),riscv64)
+    ARCH_TAG=riscv64
+  else ifeq ($(ARCH),loongarch64)
+    ARCH_TAG=loongarch64
   else
-    ifeq ($(findstring aarch64,$(ARCH)),aarch64)
-      ARCH_TAG=arm64
-    else
-      ifeq ($(ARCH),ppc64le)
-        ARCH_TAG=ppc64le
-      else
-        ARCH_TAG=x86
-      endif
-    endif
+    ARCH_TAG=x86
   endif
 endif
 
-ifneq ($(ARCH),ppc64le)
-  ifneq ($(ARCH_TAG),arm32)
-    CXXFLAGS += -momit-leaf-frame-pointer
-  endif
+ifneq (,$(findstring $(ARCH_TAG),x86 x64 arm64))
+  CXXFLAGS += -momit-leaf-frame-pointer
 endif
 
 
 .PHONY: all release test native clean
 
 all: build/bin build/lib build/$(LIB_PROFILER) build/$(LAUNCHER) build/$(API_JAR) build/$(CONVERTER_JAR)
+
+release: JAVA_TARGET=7
 
 release: $(PACKAGE_NAME).$(PACKAGE_EXT)
 
@@ -118,7 +119,7 @@ build/%:
 	mkdir -p $@
 
 build/$(LAUNCHER): src/launcher/* src/jattach/* src/fdtransfer.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPROFILER_VERSION=\"$(PROFILER_VERSION)\" -DSUPPRESS_OUTPUT -o $@ src/launcher/*.cpp src/jattach/*.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPROFILER_VERSION=\"$(PROFILER_VERSION)\" -o $@ src/launcher/*.cpp src/jattach/*.c
 	strip $@
 
 build/$(LIB_PROFILER): $(SOURCES) $(HEADERS) $(RESOURCES) $(JAVA_HELPER_CLASSES)

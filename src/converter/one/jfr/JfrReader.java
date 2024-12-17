@@ -1,17 +1,6 @@
 /*
- * Copyright 2020 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package one.jfr;
@@ -41,11 +30,15 @@ public class JfrReader implements Closeable {
     private static final int CHUNK_HEADER_SIZE = 68;
     private static final int CHUNK_SIGNATURE = 0x464c5200;
 
+    private static final byte STATE_NEW_CHUNK = 0;
+    private static final byte STATE_READING = 1;
+    private static final byte STATE_EOF = 2;
+    private static final byte STATE_INCOMPLETE = 3;
+
     private final FileChannel ch;
     private ByteBuffer buf;
     private long filePosition;
-    private boolean eof;
-    private boolean incomplete;
+    private byte state;
 
     public long startNanos = Long.MAX_VALUE;
     public long endNanos = Long.MIN_VALUE;
@@ -74,7 +67,6 @@ public class JfrReader implements Closeable {
     private int monitorEnter;
     private int threadPark;
     private int activeSetting;
-    private boolean activeSettingHasStack;
 
     public JfrReader(String fileName) throws IOException {
         this.ch = FileChannel.open(Paths.get(fileName), StandardOpenOption.READ);
@@ -99,15 +91,17 @@ public class JfrReader implements Closeable {
 
     @Override
     public void close() throws IOException {
-        ch.close();
+        if (ch != null) {
+            ch.close();
+        }
     }
 
     public boolean eof() {
-        return eof;
+        return state >= STATE_EOF;
     }
 
     public boolean incomplete() {
-        return incomplete;
+        return state == STATE_INCOMPLETE;
     }
 
     public long durationNanos() {
@@ -154,7 +148,10 @@ public class JfrReader implements Closeable {
             int type = getVarint();
 
             if (type == 'L' && buf.getInt(pos) == CHUNK_SIGNATURE) {
-                if (readChunk(pos) && !stopAtNewChunk) {
+                if (state != STATE_NEW_CHUNK && stopAtNewChunk) {
+                    buf.position(pos);
+                    state = STATE_NEW_CHUNK;
+                } else if (readChunk(pos)) {
                     continue;
                 }
                 return null;
@@ -188,7 +185,7 @@ public class JfrReader implements Closeable {
             seek(filePosition + pos + size);
         }
 
-        eof = true;
+        state = STATE_EOF;
         return null;
     }
 
@@ -233,11 +230,12 @@ public class JfrReader implements Closeable {
     }
 
     private void readActiveSetting() {
-        long time = getVarlong();
-        long duration = getVarlong();
-        int tid = getVarint();
-        if (activeSettingHasStack) getVarint();
-        long id = getVarlong();
+        for (JfrField field : typesByName.get("jdk.ActiveSetting").fields) {
+            getVarlong();
+            if ("id".equals(field.name)) {
+                break;
+            }
+        }
         String name = getString();
         String value = getString();
         settings.put(name, value);
@@ -256,7 +254,7 @@ public class JfrReader implements Closeable {
         long cpOffset = buf.getLong(pos + 16);
         long metaOffset = buf.getLong(pos + 24);
         if (cpOffset == 0 || metaOffset == 0) {
-            eof = incomplete = true;
+            state = STATE_INCOMPLETE;
             return false;
         }
 
@@ -274,6 +272,7 @@ public class JfrReader implements Closeable {
         cacheEventTypes();
 
         seek(chunkStart + CHUNK_HEADER_SIZE);
+        state = STATE_READING;
         return true;
     }
 
@@ -506,7 +505,6 @@ public class JfrReader implements Closeable {
         monitorEnter = getTypeId("jdk.JavaMonitorEnter");
         threadPark = getTypeId("jdk.ThreadPark");
         activeSetting = getTypeId("jdk.ActiveSetting");
-        activeSettingHasStack = activeSetting >= 0 && typesByName.get("jdk.ActiveSetting").field("stackTrace") != null;
 
         registerEvent("jdk.CPULoad", CPULoad.class);
         registerEvent("jdk.GCHeapSummary", GCHeapSummary.class);

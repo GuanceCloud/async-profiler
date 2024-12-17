@@ -1,17 +1,6 @@
 /*
- * Copyright 2018 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 #ifdef __APPLE__
@@ -266,6 +255,12 @@ void OS::safeFree(void* addr, size_t size) {
 
 bool OS::getCpuDescription(char* buf, size_t size) {
     return sysctlbyname("machdep.cpu.brand_string", buf, &size, NULL, 0) == 0;
+}
+
+int OS::getCpuCount() {
+    int cpu_count;
+    size_t size = sizeof(cpu_count);
+    return sysctlbyname("hw.logicalcpu", &cpu_count, &size, NULL, 0) == 0 ? cpu_count : 1;
 }
 
 u64 OS::getProcessCpuTime(u64* utime, u64* stime) {

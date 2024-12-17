@@ -1,19 +1,9 @@
 /*
- * Copyright 2023 Andrei Pangin
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <alloca.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -25,7 +15,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "fdtransferServer.h"
-#include "../jattach/psutil.h"
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -35,8 +24,7 @@
 #define APP_BINARY "asprof"
 
 static const char VERSION_STRING[] =
-    "Async-profiler " PROFILER_VERSION " built on " __DATE__ "\n"
-    "Copyright 2016-2023 Andrei Pangin\n";
+    "Async-profiler " PROFILER_VERSION " built on " __DATE__ "\n";
 
 static const char USAGE_STRING[] =
     "Usage: " APP_BINARY " [action] [options] <pid>\n"
@@ -49,6 +37,8 @@ static const char USAGE_STRING[] =
     "  status            print profiling status\n"
     "  meminfo           print profiler memory stats\n"
     "  list              list profiling events supported by the target JVM\n"
+    "  load              load agent library (jattach action)\n"
+    "  jcmd              run JVM diagnostic command (jattach action)\n"
     "  collect           collect profile for the specified period of time\n"
     "                    and then stop (default action)\n"
     "Options:\n"
@@ -59,12 +49,15 @@ static const char USAGE_STRING[] =
     "  -j jstackdepth    maximum Java stack depth\n"
     "  -t, --threads     profile different threads separately\n"
     "  -s, --simple      simple class names instead of FQN\n"
+    "  -n, --norm        normalize names of hidden classes / lambdas\n"
     "  -g, --sig         print method signatures\n"
     "  -a, --ann         annotate Java methods\n"
     "  -l, --lib         prepend library names\n"
     "  -o fmt            output format: flat|traces|collapsed|flamegraph|tree|jfr\n"
     "  -I include        output only stack traces containing the specified pattern\n"
     "  -X exclude        exclude stack traces with the specified pattern\n"
+    "  -L level          log level: debug|info|warn|error|none\n"
+    "  -F features       advanced stack trace features: vtable, comptask\n"
     "  -v, --version     display version string\n"
     "\n"
     "  --title string    FlameGraph title\n"
@@ -72,7 +65,7 @@ static const char USAGE_STRING[] =
     "  --reverse         generate stack-reversed FlameGraph / Call tree\n"
     "\n"
     "  --loop time       run profiler in a loop\n"
-    "  --ttl time        automatically shutdown profiler when <time> is up in the loop (continuous profiling) model\n"
+    "  --ttl duration    total duration the profiler will run, which is useful in the loop (continuous profiling) model\n"
     "  --alloc bytes     allocation profiling interval in bytes\n"
     "  --live            build allocation profile from live objects only\n"
     "  --lock duration   lock profiling threshold in nanoseconds\n"
@@ -80,7 +73,8 @@ static const char USAGE_STRING[] =
     "  --total           accumulate the total value (time, bytes, etc.)\n"
     "  --all-user        only include user-mode events\n"
     "  --sched           group threads by scheduling policy\n"
-    "  --cstack mode     how to traverse C stack: fp|dwarf|lbr|no\n"
+    "  --cstack mode     how to traverse C stack: fp|dwarf|lbr|vm|no\n"
+    "  --signal num      use alternative signal for cpu or wall clock profiling\n"
     "  --clock source    clock source for JFR timestamps: tsc|monotonic\n"
     "  --begin function  begin profiling when function is executed\n"
     "  --end function    end profiling when function is executed\n"
@@ -99,7 +93,7 @@ static const char USAGE_STRING[] =
     "         " APP_BINARY " -d 5 -e alloc MyAppName\n";
 
 
-extern "C" int jattach(int pid, int argc, const char** argv);
+extern "C" int jattach(int pid, int argc, const char** argv, int print_output);
 
 static void error(const char* msg) {
     fprintf(stderr, "%s\n", msg);
@@ -121,12 +115,12 @@ class Args {
     Args(int argc, const char** argv) : _argc(argc - 1), _argv(argv) {
     }
 
-    bool hasNext() const {
-        return _argc > 0;
-    }
+    int count() const { return _argc; }
+
+    const char** array() const { return _argv + 1; }
 
     const char* next() {
-        if (!hasNext()) {
+        if (count() <= 0) {
             error("Missing required parameter");
         }
         _argc--;
@@ -207,6 +201,7 @@ class String {
 
 static String action = "collect";
 static String file, logfile, output, params, format, fdtransfer, libpath;
+static bool jattach_action = false;
 static bool use_tmp_file = false;
 static int duration = 60;
 static int pid = 0;
@@ -223,26 +218,37 @@ static unsigned long long time_micros() {
 }
 
 static void setup_output_files(int pid) {
-    char current_dir[MAX_PATH];
+    char current_dir[1024];
     int self_pid = getpid();
-    get_tmp_path(pid);
 
     if (file == "") {
-        file = String(tmp_path) << "/async-profiler." << self_pid << "." << pid;
+        file = String("/tmp/asprof.") << self_pid << "." << pid;
         use_tmp_file = true;
     } else if (file.str()[0] != '/' && getcwd(current_dir, sizeof(current_dir)) != NULL) {
         file = String(current_dir) << "/" << file;
     }
-    logfile = String(tmp_path) << "/async-profiler-log." << self_pid << "." << pid;
+
+    // The agent recognizes temporary log name, see Arguments::hasTemporaryLog()
+    logfile = String("/tmp/asprof-log.") << self_pid << "." << pid;
 }
 
 static void setup_lib_path() {
+    char buf[1024];
+
 #ifdef __linux__
     const char* lib = "../lib/libasyncProfiler.so";
     char* exe = realpath("/proc/self/exe", NULL);
+    if (exe == NULL) {
+        // realpath() may fail for a path like /proc/[pid]/root/bin/asprof
+        // In this case, resolve the link as is and do not check for .so existence
+        ssize_t size = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+        if (size >= 0) {
+            buf[size] = 0;
+            exe = buf;
+        }
+    }
 #elif defined(__APPLE__)
     const char* lib = "../lib/libasyncProfiler.dylib";
-    char buf[MAX_PATH];
     uint32_t size = sizeof(buf);
     char* exe = _NSGetExecutablePath(buf, &size) == 0 ? realpath(buf, NULL) : NULL;
 #endif
@@ -252,11 +258,13 @@ static void setup_lib_path() {
         slash[1] = 0;
         libpath = String(exe) << lib;
     }
-    free(exe);
 
-    struct stat statbuf;
-    if (stat(libpath.str(), &statbuf) != 0 || !S_ISREG(statbuf.st_mode)) {
-        libpath = "asyncProfiler";
+    if (exe != buf) {
+        free(exe);
+        struct stat statbuf;
+        if (stat(libpath.str(), &statbuf) != 0 || !S_ISREG(statbuf.st_mode)) {
+            libpath = "asyncProfiler";
+        }
     }
 }
 
@@ -341,7 +349,7 @@ static void run_jattach(int pid, String& cmd) {
 
     if (child == 0) {
         const char* argv[] = {"load", libpath.str(), libpath.str()[0] == '/' ? "true" : "false", cmd.str()};
-        exit(jattach(pid, 4, argv));
+        exit(jattach(pid, 4, argv, 0));
     } else {
         int ret = wait_for_exit(child);
         if (ret != 0) {
@@ -360,12 +368,16 @@ static void run_jattach(int pid, String& cmd) {
 
 int main(int argc, const char** argv) {
     Args args(argc, argv);
-    while (args.hasNext()) {
+    while (args.count() > 0 && !(jattach_action && pid)) {
         String arg = args.next();
 
         if (arg == "start" || arg == "resume" || arg == "stop" || arg == "dump" || arg == "check" ||
             arg == "status" || arg == "meminfo" || arg == "list" || arg == "collect") {
             action = arg;
+
+        } else if (arg == "load" || arg == "jcmd" || arg == "threaddump" || arg == "dumpheap" || arg == "inspectheap") {
+            action = arg;
+            jattach_action = true;
 
         } else if (arg == "-h" || arg == "--help") {
             printf(USAGE_STRING);
@@ -400,10 +412,13 @@ int main(int argc, const char** argv) {
             params << ",jstackdepth=" << args.next();
 
         } else if (arg == "-t" || arg == "--threads") {
-            params << ",threads=";
+            params << ",threads";
 
         } else if (arg == "-s" || arg == "--simple") {
             format << ",simple";
+
+        } else if (arg == "-n" || arg == "--norm") {
+            format << ",norm";
 
         } else if (arg == "-g" || arg == "--sig") {
             format << ",sig";
@@ -419,6 +434,12 @@ int main(int argc, const char** argv) {
 
         } else if (arg == "-X" || arg == "--exclude") {
             format << ",exclude=" << args.next();
+
+        } else if (arg == "-L" || arg == "--log") {
+            format << ",loglevel=" << args.next();
+
+        } else if (arg == "-F" || arg == "--features") {
+            format << ",features=" << String(args.next()).replace(',', "+");
 
         } else if (arg == "--filter") {
             format << ",filter=" << String(args.next()).replace(',', ";");
@@ -437,7 +458,7 @@ int main(int argc, const char** argv) {
 
         } else if (arg == "--alloc" || arg == "--lock" || arg == "--wall" ||
                    arg == "--chunksize" || arg == "--chunktime" ||
-                   arg == "--cstack" || arg == "--clock" || arg == "--begin" || arg == "--end") {
+                   arg == "--cstack" || arg == "--signal" || arg == "--clock" || arg == "--begin" || arg == "--end") {
             params << "," << (arg.str() + 2) << "=" << args.next();
 
         } else if (arg == "--ttsp") {
@@ -462,7 +483,7 @@ int main(int argc, const char** argv) {
 
         } else if (arg == "--fdtransfer") {
             char buf[64];
-            snprintf(buf, sizeof(buf), "@async-profiler-%d-%08x", getpid(), (unsigned int)time_micros());
+            snprintf(buf, sizeof(buf), "@asprof-%d-%08x", getpid(), (unsigned int)time_micros());
             fdtransfer = buf;
             params << ",fdtransfer=" << fdtransfer;
 
@@ -474,7 +495,7 @@ int main(int argc, const char** argv) {
             // -XX:+PerfDisableSharedMem prevents jps from appearing in its own list
             pid = jps("pgrep -n java || jps -q -J-XX:+PerfDisableSharedMem");
 
-        } else if (arg.str()[0] != '-' && !args.hasNext() && pid == 0) {
+        } else if (arg.str()[0] != '-' && args.count() == 0 && pid == 0) {
             // The last argument is the application name as it would appear in the jps tool
             pid = jps("jps -J-XX:+PerfDisableSharedMem", arg.str());
 
@@ -489,6 +510,14 @@ int main(int argc, const char** argv) {
         return 1;
     }
 
+    if (jattach_action) {
+        argc = args.count() + 1;
+        argv = (const char**)alloca(argc * sizeof(char*));
+        argv[0] = action.str();
+        memcpy(&argv[1], args.array(), (argc - 1) * sizeof(char*));
+        return jattach(pid, argc, argv, 1);
+    }
+
     setup_output_files(pid);
     setup_lib_path();
 
@@ -499,6 +528,7 @@ int main(int argc, const char** argv) {
         fprintf(stderr, "Profiling for %d seconds\n", duration);
         end_time = time_micros() + duration * 1000000ULL;
         signal(SIGINT, sigint_handler);
+        signal(SIGTERM, sigint_handler);
 
         while (time_micros() < end_time) {
             if (kill(pid, 0) != 0) {
@@ -509,8 +539,9 @@ int main(int argc, const char** argv) {
             sleep(1);
         }
 
+        fprintf(stderr, end_time != 0 ? "Done\n" : "Interrupted\n");
         signal(SIGINT, SIG_DFL);
-        fprintf(stderr, "Done\n");
+        // Do not reset SIGTERM handler to allow graceful shutdown
 
         run_jattach(pid, String("stop,file=") << file << "," << output << format << ",log=" << logfile);
     } else {
