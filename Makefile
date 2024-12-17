@@ -46,7 +46,7 @@ ifeq ($(OS),Darwin)
   endif
 else
   CFLAGS += -static 
-  CXXFLAGS += -Wl,-z,defs -Wl,-rpath=/app/datakit-profiler/build -Wl,-rpath=/app/async-profiler/build
+  CXXFLAGS += -Wl,-z,defs
   ifeq ($(MERGE),true)
     CXXFLAGS += -fwhole-program
   endif
