@@ -342,6 +342,7 @@ static void run_fdtransfer(int pid, String& fdtransfer) {
 }
 
 static void run_jattach(int pid, String& cmd) {
+    fprintf(stderr, "javaagent cmd: %s\n", cmd.str());
     pid_t child = fork();
     if (child == -1) {
         error("fork failed", errno);
@@ -361,7 +362,7 @@ static void run_jattach(int pid, String& cmd) {
         }
 
         print_file(logfile, STDERR_FILENO);
-        if (use_tmp_file) print_file(file, STDOUT_FILENO);
+        if (use_tmp_file && strncmp(output.str(), "jfr", strlen("jfr")) != 0) print_file(file, STDOUT_FILENO);
     }
 }
 
@@ -392,6 +393,29 @@ int main(int argc, const char** argv) {
 
         } else if (arg == "-f") {
             file = args.next();
+
+        } else if (arg == "--http-out") {
+            params << ",http_out";
+            char *dd_host = getenv("DD_AGENT_HOST");
+            if (dd_host != NULL && dd_host[0] != 0) {
+                params << ",dd_host=" << dd_host;
+            }
+            char *dd_port = getenv("DD_TRACE_AGENT_PORT");
+            if (dd_port != NULL && dd_port[0] != 0) {
+                params << ",dd_port=" << dd_port;
+            }
+            char *dd_service = getenv("DD_SERVICE");
+            if (dd_service != NULL && dd_service[0] != 0) {
+                params << ",dd_service=" << dd_service;
+            }
+            char *dd_env = getenv("DD_ENV");
+            if (dd_env != NULL && dd_env[0] != 0) {
+                params << ",dd_env=" << dd_env;
+            }
+            char *dd_version = getenv("DD_VERSION");
+            if (dd_version != NULL && dd_version[0] != 0) {
+                params << ",dd_version=" << dd_version;
+            }
 
         } else if (arg == "-o") {
             output = args.next();

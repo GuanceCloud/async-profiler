@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sstream>
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -26,6 +27,8 @@
 #include "threadFilter.h"
 #include "tsc.h"
 #include "vmStructs.h"
+#include "nlohmann/json.hpp"
+#include "httplib.h"
 
 
 INCBIN(JFR_SYNC_CLASS, "src/helper/one/profiler/JfrSync.class")
@@ -501,6 +504,57 @@ class Recording {
         if (_master_recording_file != NULL) {
             appendRecording(_master_recording_file, chunk_end);
             free(_master_recording_file);
+        }
+
+        if (_global_args._http_out) {
+            off_t size = lseek(_fd, 0, SEEK_SET);
+            std::string jfr;
+            jfr.reserve(size);
+            char buf[8192];
+            ssize_t rlen;
+            while(true) {
+                rlen = read(_fd, buf, sizeof(buf));
+                if (rlen <= 0) {
+                    break;
+                }
+                jfr.append(buf, rlen);
+            }
+
+            nlohmann::json j;
+            j["format"] = "jfr";
+            j["profiler"] = "async-profiler";
+            j["attachments"] = nlohmann::json::array({"main.jfr"});
+            j["language"] = "jvm";
+            std::stringstream ss;
+            // "process_id:31145,service:zy-profiling-test,profiler_version:0.102.0~b67f6e3380,host:zydeMacBook-Air.local,runtime-id:06dddda1-957b-4619-97cb-1a78fc7e3f07,language:jvm,env:test,version:v1.2"
+            char hostname[512] = {};
+            gethostname(hostname, sizeof(hostname));
+            ss << "process_id:" << getpid() << ",host:" << hostname << ",profiler_version:" << PROFILER_VERSION << ",service:" << _global_args._dd_service;
+            ss << ",env:" << _global_args._dd_env << ",version:" << _global_args._dd_version << ",language:jvm";
+            j["tags_profiler"] = ss.str();
+            time_t start_time = Profiler::instance()->start_time();
+            time_t stop_time = Profiler::instance()->stop_time();
+            char buffer[40] = {};
+            strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", gmtime(&start_time));
+            j["start"] = std::string(buffer);
+
+            strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", gmtime(&stop_time));
+            j["end"] = std::string(buffer);
+
+            httplib::MultipartFormDataItems form = {
+                {"event", j.dump(), "event.json", "application/octet-stream"},
+                {"main", jfr, "main.jfr", "application/octet-stream"},
+            };
+            httplib::Client* cli = _global_args.httpClient();
+            httplib::Result result;
+            for (int i = 0; i < 3; i++) {
+                result = cli->Post("/profiling/v1/input", form);
+                if (result->status / 100 == 2) {
+                    break;
+                } else {
+                    Log::warn("unable to send profile file by http, status: %d, response: %s", result->status, result->body.c_str());
+                }
+            }
         }
 
         close(_fd);
@@ -1297,6 +1351,10 @@ Error FlightRecorder::start(Arguments& args, bool reset) {
     if (args._jfr_sync != NULL) {
         unlink(filename_tmp);
         free(filename_tmp);
+    }
+
+    if (args._http_out) {
+        unlink(filename);
     }
 
     _rec = new Recording(fd, master_recording_file, args);

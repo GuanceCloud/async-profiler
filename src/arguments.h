@@ -6,7 +6,10 @@
 #ifndef _ARGUMENTS_H
 #define _ARGUMENTS_H
 
+
 #include <stddef.h>
+#define CPPHTTPLIB_NO_EXCEPTIONS
+#include "httplib.h"
 
 
 const long DEFAULT_INTERVAL = 10000000;      // 10 ms
@@ -143,6 +146,7 @@ class Arguments {
   private:
     char* _buf;
     bool _shared;
+    httplib::Client* _httpcli;
 
     void appendToEmbeddedList(int& list, char* value);
     const char* expandFilePattern(const char* pattern);
@@ -199,6 +203,13 @@ class Arguments {
     const char* _title;
     double _minwidth;
     bool _reverse;
+    char *_temp_filename;
+    bool _http_out;
+    const char *_dd_agent_host;
+    int _dd_trace_agent_port;
+    const char *_dd_service;
+    const char *_dd_env;
+    const char *_dd_version;
 
     Arguments() :
         _buf(NULL),
@@ -247,7 +258,15 @@ class Arguments {
         _end(NULL),
         _title(NULL),
         _minwidth(0),
-        _reverse(false) {
+        _reverse(false),
+        _temp_filename(NULL),
+        _dd_agent_host("127.0.0.1"),
+        _dd_trace_agent_port(9529),
+        _dd_service(""),
+        _dd_env(""),
+        _dd_version(""),
+        _httpcli(NULL),
+        _http_out(false) {
     }
 
     ~Arguments();
@@ -256,7 +275,11 @@ class Arguments {
 
     Error parse(const char* args);
 
+    const char* getTempDir();
+
     const char* file();
+
+    httplib::Client* httpClient();
 
     bool hasTemporaryLog() const;
 

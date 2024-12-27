@@ -230,7 +230,7 @@ If you need to profile some code as soon as the JVM starts up, instead of using 
 it is possible to attach async-profiler as an agent on the command line. For example:
 
 ```
-$ java -agentpath:/path/to/libasyncProfiler.so=start,event=cpu,file=profile.html ...
+$ java -agentpath:/path/to/libasyncProfiler.so=start,file=/tmp/asprof.tmp.jfr,log=/tmp/asprof.log,jfr,loglevel=info,loop=60s,http_out,dd_host=127.0.0.1,dd_port=9529,dd_service=java-profiling-demo,dd_env=testing,dd_version=v0.0.1,event=cpu,alloc,lock ...
 ```
 
 Agent library is configured through the JVMTI argument interface.

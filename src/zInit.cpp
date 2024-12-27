@@ -35,6 +35,8 @@ class LateInitializer {
         _global_args._preloaded = true;
 
         Log::open(_global_args);
+        Log::info("_http_out: %d, _dd_agent_host: %s, _dd_trace_agent_port: %d, _dd_service: %s, _dd_env: %s, _dd_version: %s",
+        _global_args._http_out, _global_args._dd_agent_host, _global_args._dd_trace_agent_port, _global_args._dd_service, _global_args._dd_env, _global_args._dd_version);
 
         if (error || (error = Profiler::instance()->run(_global_args))) {
             Log::error("%s", error.message());

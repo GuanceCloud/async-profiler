@@ -10,6 +10,7 @@
 #include <time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <iostream>
 #include "arguments.h"
 
 
@@ -18,6 +19,8 @@ Arguments _global_args;
 
 // Predefined value that denotes successful operation
 const Error Error::OK(NULL);
+
+const char *MSG_EMPTY_FILE = "file must not be empty";
 
 // Extra buffer space for expanding file pattern
 const size_t EXTRA_BUF_SIZE = 512;
@@ -278,7 +281,7 @@ Error Arguments::parse(const char* args) {
 
             CASE("file")
                 if (value == NULL || value[0] == 0) {
-                    msg = "file must not be empty";
+                    msg = MSG_EMPTY_FILE;
                 }
                 _file = value;
 
@@ -389,9 +392,32 @@ Error Arguments::parse(const char* args) {
             CASE("reverse")
                 _reverse = true;
 
+            // send profile by http
+            CASE("http_out")
+                _http_out = true;
+
+            CASE("dd_host")
+                _dd_agent_host = value;
+
+            CASE("dd_port")
+                _dd_trace_agent_port = atoi(value);
+
+            CASE("dd_service")
+                _dd_service = value;
+
+            CASE("dd_env")
+                _dd_env = value;
+
+            CASE("dd_version")
+                _dd_version = value;
+
             DEFAULT()
                 if (_unknown_arg == NULL) _unknown_arg = arg;
         }
+    }
+
+    if (msg == MSG_EMPTY_FILE && _http_out) {
+        msg = NULL;
     }
 
     // Return error only after parsing all arguments, when 'log' is already set
@@ -419,11 +445,40 @@ Error Arguments::parse(const char* args) {
     return Error::OK;
 }
 
+const char* Arguments::getTempDir() {
+    char *tmpDir = std::getenv("TMPDIR");
+    if (tmpDir != nullptr && tmpDir[0] != 0) {
+        const size_t len = strlen(tmpDir);
+        if (tmpDir[len - 1] == '/') {
+            tmpDir[len - 1] = 0;
+        }
+        return tmpDir;
+    }
+    return "/tmp";
+}
+
 const char* Arguments::file() {
+    if (_file == NULL && _http_out) {
+        _temp_filename = (char *)calloc(2048, sizeof(char));
+        snprintf(_temp_filename, 2048, "%s/asprof-%d.jfr", getTempDir(), getpid());
+        _file = _temp_filename;
+    }
     if (_file != NULL && strchr(_file, '%') != NULL) {
         return expandFilePattern(_file);
     }
     return _file;
+}
+
+httplib::Client* Arguments::httpClient() {
+    if (_httpcli == NULL) {
+        _httpcli = new httplib::Client(_dd_agent_host, _dd_trace_agent_port);
+        _httpcli->set_keep_alive(true);
+        _httpcli->set_follow_location(true);
+        _httpcli->set_connection_timeout(3, 0);
+        _httpcli->set_read_timeout(5, 0);
+        _httpcli->set_write_timeout(8, 0);
+    }
+    return _httpcli;
 }
 
 // Returns true if the log file is a temporary file of asprof launcher
@@ -557,6 +612,8 @@ int Arguments::parseTimeout(const char* str) {
 
 Arguments::~Arguments() {
     if (!_shared) free(_buf);
+    if (_temp_filename != NULL) free(_temp_filename);
+    delete _httpcli;
 }
 
 void Arguments::save() {
