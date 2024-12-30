@@ -549,6 +549,10 @@ class Recording {
             httplib::Result result;
             for (int i = 0; i < 3; i++) {
                 result = cli->Post("/profiling/v1/input", form);
+                if (result == NULL) {
+                    Log::warn("unable to do http request: %s", httplib::to_string(result.error()).c_str());
+                    continue;
+                }
                 if (result->status / 100 == 2) {
                     break;
                 } else {
