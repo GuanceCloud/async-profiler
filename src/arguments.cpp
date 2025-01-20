@@ -411,6 +411,9 @@ Error Arguments::parse(const char* args) {
             CASE("dd_version")
                 _dd_version = value;
 
+            CASE("dd_tags")
+                _dd_tags = value;
+
             DEFAULT()
                 if (_unknown_arg == NULL) _unknown_arg = arg;
         }

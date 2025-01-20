@@ -210,6 +210,7 @@ class Arguments {
     const char *_dd_service;
     const char *_dd_env;
     const char *_dd_version;
+    const char *_dd_tags;
 
     Arguments() :
         _buf(NULL),
@@ -265,6 +266,7 @@ class Arguments {
         _dd_service(""),
         _dd_env(""),
         _dd_version(""),
+        _dd_tags(""),
         _httpcli(NULL),
         _http_out(false) {
     }

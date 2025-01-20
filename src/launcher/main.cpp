@@ -66,6 +66,7 @@ static const char USAGE_STRING[] =
     "\n"
     "  --loop time       run profiler in a loop\n"
     "  --ttl duration    total duration the profiler will run, which is useful in the loop (continuous profiling) model\n"
+    "  --http-out        send the profiling output to a remote server via http, additional ENVs DD_AGENT_HOST/DD_TRACE_AGENT_PORT/DD_SERVICE/DD_ENV/DD_VERSION/DD_TAGS are supported\n"
     "  --alloc bytes     allocation profiling interval in bytes\n"
     "  --live            build allocation profile from live objects only\n"
     "  --lock duration   lock profiling threshold in nanoseconds\n"
@@ -415,6 +416,10 @@ int main(int argc, const char** argv) {
             char *dd_version = getenv("DD_VERSION");
             if (dd_version != NULL && dd_version[0] != 0) {
                 params << ",dd_version=" << dd_version;
+            }
+            char *dd_tags = getenv("DD_TAGS");
+            if (dd_tags != NULL && dd_tags[0] != 0) {
+                params << ",dd_tags=" << dd_tags;
             }
 
         } else if (arg == "-o") {

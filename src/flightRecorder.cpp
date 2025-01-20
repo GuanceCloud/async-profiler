@@ -531,6 +531,9 @@ class Recording {
             gethostname(hostname, sizeof(hostname));
             ss << "process_id:" << getpid() << ",host:" << hostname << ",profiler_version:" << PROFILER_VERSION << ",service:" << _global_args._dd_service;
             ss << ",env:" << _global_args._dd_env << ",version:" << _global_args._dd_version << ",language:jvm";
+            if (_global_args._dd_tags != NULL && _global_args._dd_tags[0] != 0) {
+                ss << "," << _global_args._dd_tags;
+            }
             j["tags_profiler"] = ss.str();
             time_t start_time = Profiler::instance()->start_time();
             time_t stop_time = Profiler::instance()->stop_time();
