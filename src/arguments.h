@@ -8,8 +8,8 @@
 
 
 #include <stddef.h>
+#include <curl/curl.h>
 #define CPPHTTPLIB_NO_EXCEPTIONS
-#include "httplib.h"
 
 
 const long DEFAULT_INTERVAL = 10000000;      // 10 ms
@@ -146,7 +146,7 @@ class Arguments {
   private:
     char* _buf;
     bool _shared;
-    httplib::Client* _httpcli;
+    CURL* _curl;
 
     void appendToEmbeddedList(int& list, char* value);
     const char* expandFilePattern(const char* pattern);
@@ -267,7 +267,7 @@ class Arguments {
         _dd_env(""),
         _dd_version(""),
         _dd_tags(""),
-        _httpcli(NULL),
+        _curl(NULL),
         _http_out(false) {
     }
 
@@ -281,7 +281,7 @@ class Arguments {
 
     const char* file();
 
-    httplib::Client* httpClient();
+    CURL* httpClient();
 
     bool hasTemporaryLog() const;
 

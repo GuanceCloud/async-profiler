@@ -65,8 +65,11 @@ static const char USAGE_STRING[] =
     "  --reverse         generate stack-reversed FlameGraph / Call tree\n"
     "\n"
     "  --loop time       run profiler in a loop\n"
-    "  --ttl duration    total duration the profiler will run, which is useful in the loop (continuous profiling) model\n"
-    "  --http-out        send the profiling output to a remote server via http, additional ENVs DD_AGENT_HOST/DD_TRACE_AGENT_PORT/DD_SERVICE/DD_ENV/DD_VERSION/DD_TAGS are supported\n"
+    "  --ttl duration    total duration the profiler will run, which is\n"
+    "                    useful in the loop (continuous profiling) model\n"
+    "  --http-out        send the profiling output to a remote server via HTTP rather than saving it\n"
+    "                    in local files, and optional ENVs DD_AGENT_HOST, DD_TRACE_AGENT_PORT,\n"
+    "                    DD_SERVICE, DD_ENV, DD_VERSION, DD_TAGS are supported\n"
     "  --alloc bytes     allocation profiling interval in bytes\n"
     "  --live            build allocation profile from live objects only\n"
     "  --lock duration   lock profiling threshold in nanoseconds\n"
@@ -367,6 +370,17 @@ static void run_jattach(int pid, String& cmd) {
     }
 }
 
+static void string_to_hex(const char *str, char *hex) {
+    static const char *hex_chars = "0123456789abcdef";
+    int i;
+    for (i = 0; str[i] != '\0'; i++)
+    {
+        hex[i * 2] = hex_chars[str[i] >> 4];
+        hex[i * 2 + 1] = hex_chars[str[i] & 0xf];
+    }
+    // 在结果字符串末尾添加字符串结束符
+    hex[i * 2] = '\0';
+}
 
 int main(int argc, const char** argv) {
     Args args(argc, argv);
@@ -419,7 +433,9 @@ int main(int argc, const char** argv) {
             }
             char *dd_tags = getenv("DD_TAGS");
             if (dd_tags != NULL && dd_tags[0] != 0) {
-                params << ",dd_tags=" << dd_tags;
+                char hex_tags[strlen(dd_tags) * 2 + 1];
+                string_to_hex(dd_tags, hex_tags);
+                params << ",dd_tags=" << hex_tags;
             }
 
         } else if (arg == "-o") {
