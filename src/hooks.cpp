@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <curl/curl.h>
 #include "hooks.h"
 #include "asprof.h"
 #include "cpuEngine.h"
@@ -148,6 +149,7 @@ bool Hooks::init(bool attach) {
         return false;
     }
 
+    curl_global_init(CURL_GLOBAL_ALL);
     Profiler::instance()->updateSymbols(false);
     Profiler::setupSignalHandlers();
 
@@ -165,6 +167,7 @@ bool Hooks::init(bool attach) {
 
 void Hooks::shutdown() {
     Profiler::instance()->shutdown(_global_args);
+    curl_global_cleanup();
 }
 
 void Hooks::patchLibraries() {

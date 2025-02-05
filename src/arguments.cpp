@@ -472,16 +472,19 @@ const char* Arguments::file() {
     return _file;
 }
 
-httplib::Client* Arguments::httpClient() {
-    if (_httpcli == NULL) {
-        _httpcli = new httplib::Client(_dd_agent_host, _dd_trace_agent_port);
-        _httpcli->set_keep_alive(true);
-        _httpcli->set_follow_location(true);
-        _httpcli->set_connection_timeout(3, 0);
-        _httpcli->set_read_timeout(5, 0);
-        _httpcli->set_write_timeout(8, 0);
+CURL* Arguments::httpClient() {
+    if (_curl == NULL) {
+        _curl = curl_easy_init();
+        if (_curl) {
+            char url[2048] = {0};
+            snprintf(url, sizeof(url), "http://%s:%d/profiling/v1/input", _dd_agent_host, _dd_trace_agent_port);
+            curl_easy_setopt(_curl, CURLOPT_URL, url);
+            curl_easy_setopt(_curl, CURLOPT_CONNECTTIMEOUT, 3L);
+            curl_easy_setopt(_curl, CURLOPT_TIMEOUT, 5L);
+            curl_easy_setopt(_curl, CURLOPT_FOLLOWLOCATION, 1L);
+        }
     }
-    return _httpcli;
+    return _curl;
 }
 
 // Returns true if the log file is a temporary file of asprof launcher
@@ -616,7 +619,9 @@ int Arguments::parseTimeout(const char* str) {
 Arguments::~Arguments() {
     if (!_shared) free(_buf);
     if (_temp_filename != NULL) free(_temp_filename);
-    delete _httpcli;
+    if (_curl) {
+        curl_easy_cleanup(_curl);
+    }
 }
 
 void Arguments::save() {

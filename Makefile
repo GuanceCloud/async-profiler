@@ -11,7 +11,7 @@ CONVERTER_JAR=lib/converter.jar
 CFLAGS=-O3 -fno-exceptions
 CXXFLAGS=-O3 -fno-exceptions -fno-omit-frame-pointer -fvisibility=hidden
 INCLUDES=-I$(JAVA_HOME)/include -Isrc/helper
-LIBS=-ldl -lpthread
+LIBS=-ldl -lpthread -lcurl -lz
 MERGE=true
 
 JAVAC=$(JAVA_HOME)/bin/javac

@@ -15,6 +15,9 @@
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#include <vector>
+#include <zlib.h>
+#include <curl/curl.h>
 #include "demangle.h"
 #include "flightRecorder.h"
 #include "incbin.h"
@@ -28,13 +31,54 @@
 #include "tsc.h"
 #include "vmStructs.h"
 #include "nlohmann/json.hpp"
-#include "httplib.h"
 
 
 INCBIN(JFR_SYNC_CLASS, "src/helper/one/profiler/JfrSync.class")
 
 static void JNICALL JfrSync_stopProfiler(JNIEnv* env, jclass cls) {
     Profiler::instance()->stop();
+}
+
+static bool gzipCompress(const std::vector<unsigned char>& in, std::vector<unsigned char>& out) {
+    // 计算压缩后所需的最大缓冲区大小
+    const uLongf compressedSize = compressBound(in.size());
+    out.resize(compressedSize);
+
+    // 初始化 zlib 压缩流
+    z_stream zs;
+    memset(&zs, 0, sizeof(zs));
+    // 使用 gzip 格式进行压缩
+    if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        std::cerr << "Failed to initialize zlib deflate stream." << std::endl;
+        return false;
+    }
+
+    // 设置输入和输出缓冲区
+    zs.next_in = const_cast<Bytef*>(in.data());
+    zs.avail_in = in.size();
+    zs.next_out = out.data();
+    zs.avail_out = compressedSize;
+
+    // 执行压缩操作
+    const int ret = deflate(&zs, Z_FINISH);
+    if (ret != Z_STREAM_END) {
+        std::cerr << "Compression failed with return code: " << ret << std::endl;
+        deflateEnd(&zs);
+        return false;
+    }
+
+    // 调整输出缓冲区的大小为实际压缩后的大小
+    out.resize(zs.total_out);
+
+    // 结束压缩流并释放资源
+    deflateEnd(&zs);
+    return true;
+}
+
+static size_t curlWriteCB(void *contents, size_t size, size_t nmem, std::string *s) {
+    const size_t len = size * nmem;
+    s->append(static_cast<char *>(contents), len);
+    return len;
 }
 
 
@@ -508,16 +552,16 @@ class Recording {
 
         if (_global_args._http_out) {
             off_t size = lseek(_fd, 0, SEEK_SET);
-            std::string jfr;
+            std::vector<unsigned char> jfr;
             jfr.reserve(size);
-            char buf[8192];
+            unsigned char buf[8192];
             ssize_t rlen;
             while(true) {
                 rlen = read(_fd, buf, sizeof(buf));
                 if (rlen <= 0) {
                     break;
                 }
-                jfr.append(buf, rlen);
+                jfr.insert(jfr.end(), buf, buf+rlen);
             }
 
             nlohmann::json j;
@@ -527,7 +571,7 @@ class Recording {
             j["language"] = "jvm";
             std::stringstream ss;
             // "process_id:31145,service:zy-profiling-test,profiler_version:0.102.0~b67f6e3380,host:zydeMacBook-Air.local,runtime-id:06dddda1-957b-4619-97cb-1a78fc7e3f07,language:jvm,env:test,version:v1.2"
-            char hostname[512] = {};
+            char hostname[512] = {0};
             gethostname(hostname, sizeof(hostname));
             ss << "process_id:" << getpid() << ",host:" << hostname << ",profiler_version:" << PROFILER_VERSION << ",service:" << _global_args._dd_service;
             ss << ",env:" << _global_args._dd_env << ",version:" << _global_args._dd_version << ",language:jvm";
@@ -537,29 +581,58 @@ class Recording {
             j["tags_profiler"] = ss.str();
             time_t start_time = Profiler::instance()->start_time();
             time_t stop_time = Profiler::instance()->stop_time();
-            char buffer[40] = {};
+            char buffer[40] = {0};
             strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", gmtime(&start_time));
             j["start"] = std::string(buffer);
 
             strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", gmtime(&stop_time));
             j["end"] = std::string(buffer);
+            std::string json = nlohmann::to_string(j);
 
-            httplib::MultipartFormDataItems form = {
-                {"event", j.dump(), "event.json", "application/octet-stream"},
-                {"main", jfr, "main.jfr", "application/octet-stream"},
-            };
-            httplib::Client* cli = _global_args.httpClient();
-            httplib::Result result;
-            for (int i = 0; i < 3; i++) {
-                result = cli->Post("/profiling/v1/input", form);
-                if (result == NULL) {
-                    Log::warn("unable to do http request: %s", httplib::to_string(result.error()).c_str());
-                    continue;
-                }
-                if (result->status / 100 == 2) {
-                    break;
+            CURL* curl = _global_args.httpClient();
+            if (curl != NULL) {
+                std::vector<unsigned char> gzipOut;
+                if (!gzipCompress(jfr, gzipOut)) {
+                    Log::error("failed to gzip compress jfr file");
                 } else {
-                    Log::warn("unable to send profile file by http, status: %d, response: %s", result->status, result->body.c_str());
+                    for (int i = 0; i < 3; i++) {
+                        curl_easy_reset(curl);
+                        curl_mime *multipart = curl_mime_init(curl);
+                        curl_mimepart *part = curl_mime_addpart(multipart);
+                        curl_mime_name(part, "event");
+                        curl_mime_filename(part, "event.json"); // set the form filename
+                        curl_mime_type(part, "application/json");
+                        curl_mime_data(part, json.data(), json.size());
+
+                        part = curl_mime_addpart(multipart);
+                        curl_mime_name(part, "main");
+                        curl_mime_filename(part, "main.jfr");
+                        curl_mime_type(part, "application/octet-stream");
+                        curl_mime_data(part, reinterpret_cast<const char *>(gzipOut.data()), gzipOut.size());
+
+                        curl_easy_setopt(curl, CURLOPT_MIMEPOST, multipart);
+                        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCB);
+                        std::string resp;
+                        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+
+                        const CURLcode res = curl_easy_perform(curl);
+                        // 清理 multipart 表单数据
+                        curl_mime_free(multipart);
+
+                        // 检查请求是否成功
+                        if(res != CURLE_OK) {
+                            Log::warn("unable to do http request, errcode: %d, errmsg: %s", res, curl_easy_strerror(res));
+                            continue;
+                        } else {
+                            long httpCode;
+                            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+                            if (httpCode / 100 == 2) {
+                                break;
+                            } else {
+                                Log::warn("unable to send profile file by http, status code: %ld, response: %s", httpCode, resp.c_str());
+                            }
+                        }
+                    }
                 }
             }
         }
