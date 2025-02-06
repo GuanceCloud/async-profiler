@@ -596,7 +596,7 @@ class Recording {
                     Log::error("failed to gzip compress jfr file");
                 } else {
                     for (int i = 0; i < 3; i++) {
-                        curl_easy_reset(curl);
+                        //curl_easy_reset(curl);
                         curl_mime *multipart = curl_mime_init(curl);
                         curl_mimepart *part = curl_mime_addpart(multipart);
                         curl_mime_name(part, "event");
