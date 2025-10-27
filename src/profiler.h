@@ -67,7 +67,7 @@ class Profiler {
     int _event_mask;
 
     bool _in_first_loop;
-    time_t _hung_time;
+    u64 _hung_time;
     u64 _start_time;
     u64 _stop_time;
     int _epoch;

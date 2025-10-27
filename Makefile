@@ -95,12 +95,7 @@ ifeq ($(OS),Darwin)
     MERGE=false
   endif
 else
-<<<<<<< HEAD
-  CFLAGS += -static 
-  CXXFLAGS += -Wl,-z,defs
-=======
   CXXFLAGS += -U_FORTIFY_SOURCE -Wl,-z,defs -Wl,--exclude-libs,ALL -static-libstdc++ -static-libgcc -fdata-sections -ffunction-sections -Wl,--gc-sections -ggdb -Wunused-variable
->>>>>>> 8f7e4e19ccd844d2ede601c91f2c5dd89de9f331
   ifeq ($(MERGE),true)
     CXXFLAGS += -fwhole-program
   endif
