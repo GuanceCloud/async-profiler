@@ -65,7 +65,8 @@ static const char USAGE_STRING[] =
     "  --reverse         generate stack-reversed FlameGraph / Call tree\n"
     "\n"
     "  --loop time       run profiler in a loop\n"
-    "  --ttl duration    total duration the profiler will run, which is useful in the loop (continuous profiling) model\n"
+    "  --ttl duration    total duration the profiler will run, which is\n"
+    "                    useful in the loop (continuous profiling) model\n"
     "  --alloc bytes     allocation profiling interval in bytes\n"
     "  --live            build allocation profile from live objects only\n"
     "  --lock duration   lock profiling threshold in nanoseconds\n"
@@ -342,6 +343,7 @@ static void run_fdtransfer(int pid, String& fdtransfer) {
 }
 
 static void run_jattach(int pid, String& cmd) {
+    fprintf(stderr, "javaagent cmd: %s\n", cmd.str());
     pid_t child = fork();
     if (child == -1) {
         error("fork failed", errno);
