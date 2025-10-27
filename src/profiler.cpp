@@ -2049,7 +2049,7 @@ Error Profiler::restart(Arguments& args) {
     }
 
     if (args._loop) {
-        if (_hung_time > 0 && OS::micros() >= (u64)_hung_time * 1000000ULL) {
+        if (_hung_time > 0 && OS::micros() >= _hung_time) {
             Log::info("Time to live reached");
             FdTransferClient::closePeer(); // close the fdtransfer connection
             return Error::OK;
