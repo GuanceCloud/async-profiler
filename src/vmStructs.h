@@ -9,6 +9,7 @@
 #include <jvmti.h>
 #include <stdint.h>
 #include <string.h>
+#include <type_traits>
 #include "codeCache.h"
 
 
@@ -25,6 +26,7 @@ class VMStructs {
     static bool _has_class_loader_data;
     static bool _has_native_thread_id;
     static bool _has_perm_gen;
+    static bool _can_dereference_jmethod_id;
     static bool _compact_object_headers;
 
     static int _klass_name_offset;
@@ -42,40 +44,48 @@ class VMStructs {
     static int _thread_vframe_offset;
     static int _thread_exception_offset;
     static int _osthread_id_offset;
+    static int _call_wrapper_anchor_offset;
     static int _comp_env_offset;
     static int _comp_task_offset;
     static int _comp_method_offset;
     static int _anchor_sp_offset;
     static int _anchor_pc_offset;
     static int _anchor_fp_offset;
+    static int _blob_size_offset;
     static int _frame_size_offset;
     static int _frame_complete_offset;
-    static int _code_begin_offset;
-    static int _scopes_begin_offset;
+    static int _code_offset;
+    static int _data_offset;
+    static int _mutable_data_offset;
+    static int _relocation_size_offset;
+    static int _scopes_pcs_offset;
+    static int _scopes_data_offset;
     static int _nmethod_name_offset;
     static int _nmethod_method_offset;
     static int _nmethod_entry_offset;
     static int _nmethod_state_offset;
     static int _nmethod_level_offset;
     static int _nmethod_metadata_offset;
-    static int _nmethod_pcs_begin_offset;
-    static int _nmethod_pcs_end_offset;
+    static int _nmethod_immutable_offset;
     static int _method_constmethod_offset;
     static int _method_code_offset;
     static int _constmethod_constants_offset;
     static int _constmethod_idnum_offset;
     static int _constmethod_size;
     static int _pool_holder_offset;
+    static int _array_len_offset;
     static int _array_data_offset;
     static int _code_heap_memory_offset;
     static int _code_heap_segmap_offset;
     static int _code_heap_segment_shift;
+    static int _heap_block_used_offset;
     static int _vs_low_bound_offset;
     static int _vs_high_bound_offset;
     static int _vs_low_offset;
     static int _vs_high_offset;
     static int _flag_name_offset;
     static int _flag_addr_offset;
+    static int _flag_origin_offset;
     static const char* _flags_addr;
     static int _flag_count;
     static int _flag_size;
@@ -97,6 +107,7 @@ class VMStructs {
     static int _region_size_offset;
     static int _markword_klass_shift;
     static int _markword_monitor_value;
+    static int _entry_frame_call_wrapper_offset;
     static int _interpreter_frame_bcp_offset;
     static unsigned char _unsigned5_base;
     static const void** _call_stub_return_addr;
@@ -109,6 +120,7 @@ class VMStructs {
     static jfieldID _klass;
     static int _tls_index;
     static intptr_t _env_offset;
+    static void* _java_thread_vtbl[6];
 
     typedef void (*LockFunc)(void*);
     static LockFunc _lock_func;
@@ -120,8 +132,7 @@ class VMStructs {
     static void patchSafeFetch();
     static void initJvmFunctions();
     static void initTLS(void* vm_thread);
-    static void initThreadBridge(JNIEnv* env);
-    static void initLogging(JNIEnv* env);
+    static void initThreadBridge();
 
     const char* at(int offset) {
         return (const char*)this + offset;
@@ -129,6 +140,12 @@ class VMStructs {
 
     static bool goodPtr(const void* ptr) {
         return (uintptr_t)ptr >= 0x1000 && ((uintptr_t)ptr & (sizeof(uintptr_t) - 1)) == 0;
+    }
+
+    template<typename T>
+    static T align(const void* ptr) {
+        static_assert(std::is_pointer<T>::value, "T must be a pointer type");
+        return (T)((uintptr_t)ptr & ~(sizeof(T) - 1));
     }
 
   public:
@@ -170,11 +187,6 @@ class VMStructs {
     static bool isInterpretedFrameValidFunc(const void* pc) {
         return pc >= _interpreted_frame_valid_start && pc < _interpreted_frame_valid_end;
     }
-
-    typedef jvmtiError (*GetStackTraceFunc)(void* self, void* thread,
-                                            jint start_depth, jint max_frame_count,
-                                            jvmtiFrameInfo* frame_buffer, jint* count_ptr);
-    static GetStackTraceFunc _get_stack_trace;
 };
 
 
@@ -293,6 +305,46 @@ class VMKlass : VMStructs {
     }
 };
 
+class JavaFrameAnchor : VMStructs {
+  private:
+    enum { MAX_CALL_WRAPPER_DISTANCE = 512 };
+
+  public:
+    static JavaFrameAnchor* fromEntryFrame(uintptr_t fp) {
+        const char* call_wrapper = *(const char**)(fp + _entry_frame_call_wrapper_offset);
+        if (!goodPtr(call_wrapper) || (uintptr_t)call_wrapper - fp > MAX_CALL_WRAPPER_DISTANCE) {
+            return NULL;
+        }
+        return (JavaFrameAnchor*)(call_wrapper + _call_wrapper_anchor_offset);
+    }
+
+    uintptr_t lastJavaSP() {
+        return *(uintptr_t*) at(_anchor_sp_offset);
+    }
+
+    uintptr_t lastJavaFP() {
+        return *(uintptr_t*) at(_anchor_fp_offset);
+    }
+
+    const void* lastJavaPC() {
+        return *(const void**) at(_anchor_pc_offset);
+    }
+
+    void setLastJavaPC(const void* pc) {
+        *(const void**) at(_anchor_pc_offset) = pc;
+    }
+
+    bool getFrame(const void*& pc, uintptr_t& sp, uintptr_t& fp) {
+        if (lastJavaPC() != NULL && lastJavaSP() != 0) {
+            pc = lastJavaPC();
+            sp = lastJavaSP();
+            fp = lastJavaFP();
+            return true;
+        }
+        return false;
+    }
+};
+
 class VMThread : VMStructs {
   public:
     static VMThread* current();
@@ -305,19 +357,28 @@ class VMThread : VMStructs {
         return (VMThread*)(uintptr_t)env->GetLongField(thread, _eetop);
     }
 
-    static VMThread* fromEnv(JNIEnv* env) {
-        return (VMThread*)((intptr_t)env - _env_offset);
-    }
-
     static jlong javaThreadId(JNIEnv* env, jthread thread) {
         return env->GetLongField(thread, _tid);
     }
 
     static int nativeThreadId(JNIEnv* jni, jthread thread);
 
-    int osThreadId() {
-        const char* osthread = *(const char**) at(_thread_osthread_offset);
-        return osthread != NULL ? *(int*)(osthread + _osthread_id_offset) : -1;
+    int osThreadId();
+
+    JNIEnv* jni();
+
+    const void** vtable() {
+        return *(const void***)this;
+    }
+
+    // This thread is considered a JavaThread if at least 2 of the selected 3 vtable entries
+    // match those of a known JavaThread (which is either application thread or AttachListener).
+    // Indexes were carefully chosen to work on OpenJDK 8 to 25, both product an debug builds.
+    bool isJavaThread() {
+        const void** vtbl = vtable();
+        return (vtbl[1] == _java_thread_vtbl[1]) +
+               (vtbl[3] == _java_thread_vtbl[3]) +
+               (vtbl[5] == _java_thread_vtbl[5]) >= 2;
     }
 
     int state() {
@@ -336,16 +397,8 @@ class VMThread : VMStructs {
         return *(void**) at(_thread_exception_offset);
     }
 
-    uintptr_t& lastJavaSP() {
-        return *(uintptr_t*) (at(_thread_anchor_offset) + _anchor_sp_offset);
-    }
-
-    uintptr_t& lastJavaPC() {
-        return *(uintptr_t*) (at(_thread_anchor_offset) + _anchor_pc_offset);
-    }
-
-    uintptr_t& lastJavaFP() {
-        return *(uintptr_t*) (at(_thread_anchor_offset) + _anchor_fp_offset);
+    JavaFrameAnchor* anchor() {
+        return (JavaFrameAnchor*) at(_thread_anchor_offset);
     }
 
     VMMethod* compiledMethod() {
@@ -362,11 +415,17 @@ class VMThread : VMStructs {
 
 class VMMethod : VMStructs {
   public:
-    static VMMethod* fromMethodID(jmethodID id) {
-        return *(VMMethod**)id;
-    }
-
     jmethodID id();
+
+    // Performs extra validation when VMMethod comes from incomplete frame
+    jmethodID validatedId();
+
+    // Workaround for JDK-8313816
+    static bool isStaleMethodId(jmethodID id) {
+        if (!_can_dereference_jmethod_id) return false;
+        VMMethod* vm_method = *(VMMethod**)id;
+        return vm_method == NULL || vm_method->id() == NULL;
+    }
 
     const char* bytecode() {
         return *(const char**) at(_method_constmethod_offset) + _constmethod_size;
@@ -379,32 +438,60 @@ class VMMethod : VMStructs {
 
 class NMethod : VMStructs {
   public:
+    int size() {
+        return *(int*) at(_blob_size_offset);
+    }
+
     int frameSize() {
         return *(int*) at(_frame_size_offset);
     }
 
-    int frameCompleteOffset() {
-        return *(int*) at(_frame_complete_offset);
+    short frameCompleteOffset() {
+        return *(short*) at(_frame_complete_offset);
     }
 
     void setFrameCompleteOffset(int offset) {
-        *(int*) at(_frame_complete_offset) = offset;
+        if (_nmethod_immutable_offset > 0) {
+            // _frame_complete_offset is short on JDK 23+
+            *(short*) at(_frame_complete_offset) = offset;
+        } else {
+            *(int*) at(_frame_complete_offset) = offset;
+        }
+    }
+
+    const char* immutableDataAt(int offset) {
+        if (_nmethod_immutable_offset > 0) {
+            return *(const char**) at(_nmethod_immutable_offset) + offset;
+        }
+        return at(offset);
     }
 
     const char* code() {
-        if (_code_begin_offset >= 0) {
-            return *(const char**) at(_code_begin_offset);
+        if (_code_offset > 0) {
+            return at(*(int*) at(_code_offset));
         } else {
-            return at(*(int*) at(-_code_begin_offset));
+            return *(const char**) at(-_code_offset);
         }
     }
 
     const char* scopes() {
-        if (_scopes_begin_offset >= 0) {
-            return *(const char**) at(_scopes_begin_offset);
+        if (_scopes_data_offset > 0) {
+            return immutableDataAt(*(int*) at(_scopes_data_offset));
         } else {
-            return at(*(int*) at(-_scopes_begin_offset));
+            return *(const char**) at(-_scopes_data_offset);
         }
+    }
+
+    const void* entry() {
+        if (_nmethod_entry_offset > 0) {
+            return at(*(int*) at(_code_offset) + *(unsigned short*) at(_nmethod_entry_offset));
+        } else {
+            return *(void**) at(-_nmethod_entry_offset);
+        }
+    }
+
+    bool contains(const void* pc) {
+        return pc >= this && pc < at(size());
     }
 
     bool isFrameCompleteAt(const void* pc) {
@@ -429,12 +516,18 @@ class NMethod : VMStructs {
         return n != NULL && strcmp(n, "Interpreter") == 0;
     }
 
-    VMMethod* method() {
-        return *(VMMethod**) at(_nmethod_method_offset);
+    bool isStub() {
+        const char* n = name();
+        return n != NULL && strncmp(n, "StubRoutines", 12) == 0;
     }
 
-    void* entry() {
-        return *(void**) at(_nmethod_entry_offset);
+    bool isVTableStub() {
+        const char* n = name();
+        return n != NULL && strcmp(n, "vtable chunks") == 0;
+    }
+
+    VMMethod* method() {
+        return *(VMMethod**) at(_nmethod_method_offset);
     }
 
     char state() {
@@ -450,6 +543,13 @@ class NMethod : VMStructs {
     }
 
     VMMethod** metadata() {
+        if (_mutable_data_offset >= 0) {
+            // Since JDK 25
+            return (VMMethod**) (*(char**) at(_mutable_data_offset) + *(int*) at(_relocation_size_offset));
+        } else if (_data_offset > 0) {
+            // since JDK 23
+            return (VMMethod**) at(*(int*) at(_data_offset) + *(unsigned short*) at(_nmethod_metadata_offset));
+        }
         return (VMMethod**) at(*(int*) at(_nmethod_metadata_offset));
     }
 
@@ -494,6 +594,10 @@ class CodeHeap : VMStructs {
 
 class CollectedHeap : VMStructs {
   public:
+    static bool created() {
+        return _collected_heap_addr != NULL && *_collected_heap_addr != NULL;
+    }
+
     static CollectedHeap* heap() {
         return (CollectedHeap*)_collected_heap;
     }
@@ -508,15 +612,40 @@ class CollectedHeap : VMStructs {
 };
 
 class JVMFlag : VMStructs {
+  private:
+    enum {
+        ORIGIN_DEFAULT = 0,
+        ORIGIN_MASK    = 15,
+        SET_ON_CMDLINE = 1 << 17
+    };
+
   public:
-    static void* find(const char* name);
+    static JVMFlag* find(const char* name);
 
     const char* name() {
         return *(const char**) at(_flag_name_offset);
     }
 
-    void* addr() {
-        return *(void**) at(_flag_addr_offset);
+    char* addr() {
+        return *(char**) at(_flag_addr_offset);
+    }
+
+    bool isDefault() {
+        return _flag_origin_offset < 0 || (*(int*) at(_flag_origin_offset) & ORIGIN_MASK) == ORIGIN_DEFAULT;
+    }
+
+    void setCmdline() {
+        if (_flag_origin_offset >= 0) {
+            *(int*) at(_flag_origin_offset) |= SET_ON_CMDLINE;
+        }
+    }
+
+    char get() {
+        return *addr();
+    }
+
+    void set(char value) {
+        *addr() = value;
     }
 };
 
@@ -530,7 +659,8 @@ class PcDesc {
 
 class ScopeDesc : VMStructs {
   private:
-    NMethod* _nm;
+    const unsigned char* _scopes;
+    VMMethod** _metadata;
     const unsigned char* _stream;
     int _method_offset;
     int _bci;
@@ -538,11 +668,13 @@ class ScopeDesc : VMStructs {
     int readInt();
 
   public:
-    ScopeDesc(NMethod* nm) : _nm(nm) {
+    ScopeDesc(NMethod* nm) {
+        _scopes = (const unsigned char*)nm->scopes();
+        _metadata = nm->metadata();
     }
 
     int decode(int offset) {
-        _stream = (const unsigned char*)_nm->scopes() + offset;
+        _stream = _scopes + offset;
         int sender_offset = readInt();
         _method_offset = readInt();
         _bci = readInt() - 1;
@@ -550,7 +682,7 @@ class ScopeDesc : VMStructs {
     }
 
     VMMethod* method() {
-        return _method_offset > 0 ? _nm->metadata()[_method_offset - 1] : NULL;
+        return _method_offset > 0 ? _metadata[_method_offset - 1] : NULL;
     }
 
     int bci() {

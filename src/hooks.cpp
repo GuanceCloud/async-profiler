@@ -11,8 +11,15 @@
 #include "hooks.h"
 #include "asprof.h"
 #include "cpuEngine.h"
+#include "mallocTracer.h"
 #include "profiler.h"
+#include "symbols.h"
 
+
+#define ADDRESS_OF(sym) ({ \
+    void* addr = dlsym(RTLD_NEXT, #sym); \
+    addr != NULL ? (sym##_t)addr : sym;  \
+})
 
 typedef void* (*ThreadFunc)(void*);
 
@@ -92,6 +99,7 @@ static void* dlopen_hook_impl(const char* filename, int flags, bool patch) {
         if (patch) {
             Hooks::patchLibraries();
         }
+        MallocTracer::installHooks();
     }
     return result;
 }
@@ -103,10 +111,10 @@ static void* dlopen_hook(const char* filename, int flags) {
 
 // LD_PRELOAD hooks
 
-extern "C" DLLEXPORT
+extern "C" WEAK DLLEXPORT
 int pthread_create(pthread_t* thread, const pthread_attr_t* attr, ThreadFunc start_routine, void* arg) {
     if (_orig_pthread_create == NULL) {
-        _orig_pthread_create = (pthread_create_t)dlsym(RTLD_NEXT, "pthread_create");
+        _orig_pthread_create = ADDRESS_OF(pthread_create);
     }
     if (Hooks::initialized()) {
         return pthread_create_hook(thread, attr, start_routine, arg);
@@ -114,10 +122,10 @@ int pthread_create(pthread_t* thread, const pthread_attr_t* attr, ThreadFunc sta
     return _orig_pthread_create(thread, attr, start_routine, arg);
 }
 
-extern "C" DLLEXPORT
+extern "C" WEAK DLLEXPORT
 void pthread_exit(void* retval) {
     if (_orig_pthread_exit == NULL) {
-        _orig_pthread_exit = (pthread_exit_t)dlsym(RTLD_NEXT, "pthread_exit");
+        _orig_pthread_exit = ADDRESS_OF(pthread_exit);
     }
     if (Hooks::initialized()) {
         pthread_exit_hook(retval);
@@ -127,10 +135,10 @@ void pthread_exit(void* retval) {
     abort();  // to suppress gcc warning
 }
 
-extern "C" DLLEXPORT
+extern "C" WEAK DLLEXPORT
 void* dlopen(const char* filename, int flags) {
     if (_orig_dlopen == NULL) {
-        _orig_dlopen = (dlopen_t)dlsym(RTLD_NEXT, "dlopen");
+        _orig_dlopen = ADDRESS_OF(dlopen);
     }
     if (Hooks::initialized()) {
         return dlopen_hook_impl(filename, flags, false);
@@ -148,13 +156,13 @@ bool Hooks::init(bool attach) {
         return false;
     }
 
-    Profiler::instance()->updateSymbols(false);
     Profiler::setupSignalHandlers();
 
     if (attach) {
-        _orig_pthread_create = pthread_create;
-        _orig_pthread_exit = pthread_exit;
-        _orig_dlopen = dlopen;
+        Profiler::instance()->updateSymbols(false);
+        _orig_pthread_create = ADDRESS_OF(pthread_create);
+        _orig_pthread_exit = ADDRESS_OF(pthread_exit);
+        _orig_dlopen = ADDRESS_OF(dlopen);
         patchLibraries();
     }
 
@@ -175,7 +183,15 @@ void Hooks::patchLibraries() {
 
     while (_patched_libs < native_lib_count) {
         CodeCache* cc = (*native_libs)[_patched_libs++];
-        cc->patchImport(im_dlopen, (void*)dlopen_hook);
+        UnloadProtection handle(cc);
+        if (!handle.isValid()) {
+            continue;
+        }
+
+        if (!cc->contains((const void*)Hooks::init)) {
+            // Let libasyncProfiler always use original dlopen
+            cc->patchImport(im_dlopen, (void*)dlopen_hook);
+        }
         cc->patchImport(im_pthread_create, (void*)pthread_create_hook);
         cc->patchImport(im_pthread_exit, (void*)pthread_exit_hook);
     }

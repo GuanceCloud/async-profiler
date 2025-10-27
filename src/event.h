@@ -7,6 +7,7 @@
 #define _EVENT_H
 
 #include <stdint.h>
+#include "asprof.h"
 #include "os.h"
 
 
@@ -14,49 +15,68 @@
 enum EventType {
     PERF_SAMPLE,
     EXECUTION_SAMPLE,
+    WALL_CLOCK_SAMPLE,
+    MALLOC_SAMPLE,
     INSTRUMENTED_METHOD,
+    METHOD_TRACE,
     ALLOC_SAMPLE,
     ALLOC_OUTSIDE_TLAB,
     LIVE_OBJECT,
     LOCK_SAMPLE,
     PARK_SAMPLE,
     PROFILING_WINDOW,
+    USER_EVENT,
 };
 
 class Event {
+};
+
+class EventWithClassId : public Event {
   public:
-    u32 id() {
-        return *(u32*)this;
-    }
+    u32 _class_id;
 };
 
 class ExecutionEvent : public Event {
   public:
+    u64 _start_time;
     ThreadState _thread_state;
 
-    ExecutionEvent() : _thread_state(THREAD_UNKNOWN) {
-    }
+    ExecutionEvent(u64 start_time) : _start_time(start_time), _thread_state(THREAD_UNKNOWN) {}
 };
 
-class AllocEvent : public Event {
+class MethodTraceEvent : public Event {
   public:
-    u32 _class_id;
+    u64 _start_time;
+    u64 _duration;
+
+    MethodTraceEvent(u64 start_time, u64 duration) : _start_time(start_time), _duration(duration) {}
+};
+
+class WallClockEvent : public Event {
+  public:
+    u64 _start_time;
+    ThreadState _thread_state;
+    u32 _samples;
+};
+
+class AllocEvent : public EventWithClassId {
+  public:
+    u64 _start_time;
     u64 _total_size;
     u64 _instance_size;
 };
 
-class LockEvent : public Event {
+class LockEvent : public EventWithClassId {
   public:
-    u32 _class_id;
     u64 _start_time;
     u64 _end_time;
     uintptr_t _address;
     long long _timeout;
 };
 
-class LiveObject : public Event {
+class LiveObject : public EventWithClassId {
   public:
-    u32 _class_id;
+    u64 _start_time;
     u64 _alloc_size;
     u64 _alloc_time;
 };
@@ -65,6 +85,21 @@ class ProfilingWindow : public Event {
   public:
     u64 _start_time;
     u64 _end_time;
+};
+
+class MallocEvent : public Event {
+  public:
+    u64 _start_time;
+    uintptr_t _address;
+    u64 _size;
+};
+
+class UserEvent : public Event {
+  public:
+    u64 _start_time;
+    asprof_jfr_event_key _type;
+    const uint8_t* _data;
+    size_t _len;
 };
 
 #endif // _EVENT_H

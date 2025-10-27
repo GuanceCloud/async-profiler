@@ -12,8 +12,6 @@
 #define NO_MIN_ADDRESS  ((const void*)-1)
 #define NO_MAX_ADDRESS  ((const void*)0)
 
-typedef bool (*NamePredicate)(const char* name);
-
 const int INITIAL_CODE_CACHE_CAPACITY = 1000;
 const int MAX_NATIVE_LIBS = 2048;
 
@@ -23,12 +21,27 @@ enum ImportId {
     im_pthread_create,
     im_pthread_exit,
     im_pthread_setspecific,
+    im_poll,
+    im_malloc,
+    im_calloc,
+    im_realloc,
+    im_free,
+    im_posix_memalign,
+    im_aligned_alloc,
     NUM_IMPORTS
 };
 
+enum ImportType {
+    PRIMARY,
+    SECONDARY,
+    NUM_IMPORT_TYPES
+};
+
 enum Mark {
-    MARK_INTERPRETER = 1,
-    MARK_COMPILER_ENTRY = 2
+    MARK_VM_RUNTIME = 1,
+    MARK_INTERPRETER = 2,
+    MARK_COMPILER_ENTRY = 3,
+    MARK_ASYNC_PROFILER = 4, // async-profiler internals such as native hooks.
 };
 
 
@@ -94,11 +107,12 @@ class CodeCache {
     const void* _min_address;
     const void* _max_address;
     const char* _text_base;
+    const char* _image_base;
 
     unsigned int _plt_offset;
     unsigned int _plt_size;
 
-    void** _imports[NUM_IMPORTS];
+    void** _imports[NUM_IMPORTS][NUM_IMPORT_TYPES];
     bool _imports_patchable;
     bool _debug_symbols;
 
@@ -110,14 +124,15 @@ class CodeCache {
     CodeBlob* _blobs;
 
     void expand();
-    void makeImportsPatchable();
+    bool makeImportsPatchable();
+    void saveImport(ImportId id, void** entry);
 
   public:
     CodeCache(const char* name,
               short lib_index = -1,
-              bool imports_patchable = false,
               const void* min_address = NO_MIN_ADDRESS,
-              const void* max_address = NO_MAX_ADDRESS);
+              const void* max_address = NO_MAX_ADDRESS,
+              const char* image_base = NULL);
 
     ~CodeCache();
 
@@ -131,6 +146,10 @@ class CodeCache {
 
     const void* maxAddress() const {
         return _max_address;
+    }
+
+    const char* imageBase() const {
+        return _image_base;
     }
 
     bool contains(const void* address) const {
@@ -157,11 +176,25 @@ class CodeCache {
     void add(const void* start, int length, const char* name, bool update_bounds = false);
     void updateBounds(const void* start, const void* end);
     void sort();
-    void mark(NamePredicate predicate, char value);
+
+    template <typename NamePredicate>
+    inline void mark(NamePredicate predicate, char value) {
+        for (int i = 0; i < _count; i++) {
+            const char* blob_name = _blobs[i]._name;
+            if (blob_name != NULL && predicate(blob_name)) {
+                NativeFunc::mark(blob_name, value);
+            }
+        }
+
+        if (value == MARK_VM_RUNTIME && _name != NULL) {
+            // In case a library has no debug symbols
+            NativeFunc::mark(_name, value);
+        }
+    }
 
     void addImport(void** entry, const char* name);
     void** findImport(ImportId id);
-    void patchImport(ImportId, void* hook_func);
+    void patchImport(ImportId id, void* hook_func);
 
     CodeBlob* findBlob(const char* name);
     CodeBlob* findBlobByAddress(const void* address);
@@ -174,6 +207,8 @@ class CodeCache {
     FrameDesc* findFrameDesc(const void* pc);
 
     size_t usedMemory();
+
+    friend class UnloadProtection;
 };
 
 

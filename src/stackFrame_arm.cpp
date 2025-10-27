@@ -101,6 +101,26 @@ bool StackFrame::unwindCompiled(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintp
     return true;
 }
 
+bool StackFrame::unwindPrologue(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
+    instruction_t* ip = (instruction_t*)pc;
+    instruction_t* entry = (instruction_t*)nm->entry();
+    if (ip <= entry) {
+        pc = link();
+        return true;
+    }
+    return false;
+}
+
+bool StackFrame::unwindEpilogue(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
+    // Not yet implemented
+    return false;
+}
+
+bool StackFrame::unwindAtomicStub(const void*& pc) {
+    // Not needed
+    return false;
+}
+
 void StackFrame::adjustSP(const void* entry, const void* pc, uintptr_t& sp) {
     // Not needed
 }

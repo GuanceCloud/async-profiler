@@ -44,6 +44,8 @@ Matcher::Matcher(const Matcher& m) {
 }
 
 Matcher& Matcher::operator=(const Matcher& m) {
+    if (this == &m) return *this;
+
     free(_pattern);
 
     _type = m._type;
@@ -80,13 +82,14 @@ FrameName::FrameName(Arguments& args, int style, int epoch, Mutex& thread_names_
     _cache_epoch((unsigned char)epoch),
     _cache_max_age(args._mcache),
     _thread_names_lock(thread_names_lock),
-    _thread_names(thread_names)
+    _thread_names(thread_names),
+    _jni(VM::jni())
 {
     // Require printf to use standard C format regardless of system locale
     _saved_locale = uselocale(newlocale(LC_NUMERIC_MASK, "C", (locale_t)0));
 
-    buildFilter(_include, args._buf, args._include);
-    buildFilter(_exclude, args._buf, args._exclude);
+    for (const char* s : args._include) _include.push_back(s);
+    for (const char* s : args._exclude) _exclude.push_back(s);
 
     Profiler::instance()->classMap()->collect(_class_names);
 }
@@ -108,17 +111,10 @@ FrameName::~FrameName() {
     freelocale(uselocale(_saved_locale));
 }
 
-void FrameName::buildFilter(std::vector<Matcher>& vector, const char* base, int offset) {
-    while (offset != 0) {
-        vector.push_back(base + offset);
-        offset = ((int*)(base + offset))[-1];
-    }
-}
-
 const char* FrameName::decodeNativeSymbol(const char* name) {
     const char* lib_name = (_style & STYLE_LIB_NAMES) ? Profiler::instance()->getLibraryName(name) : NULL;
 
-    if (name[0] == '_' && name[1] == 'Z') {
+    if (Demangle::needsDemangling(name)) {
         char* demangled = Demangle::demangle(name, _style & STYLE_SIGNATURES);
         if (demangled != NULL) {
             if (lib_name != NULL) {
@@ -152,16 +148,12 @@ const char* FrameName::typeSuffix(FrameTypeId type) {
 }
 
 void FrameName::javaMethodName(jmethodID method) {
-    if (VMStructs::hasMethodStructs()) {
-        // Workaround for JDK-8313816
-        VMMethod* vm_method = VMMethod::fromMethodID(method);
-        if (vm_method == NULL || vm_method->id() == NULL) {
-            _str.assign("[stale_jmethodID]");
-            return;
-        }
+    if (VMMethod::isStaleMethodId(method)) {
+        _str.assign("[stale_jmethodID]");
+        return;
     }
 
-    jclass method_class;
+    jclass method_class = NULL;
     char* class_name = NULL;
     char* method_name = NULL;
     char* method_sig = NULL;
@@ -183,12 +175,17 @@ void FrameName::javaMethodName(jmethodID method) {
             }
             _str.append(method_sig);
         }
+    } else if (err == JVMTI_ERROR_INVALID_METHODID) {
+        _str.assign("[stale_jmethodID]");
     } else {
         char buf[32];
         snprintf(buf, sizeof(buf), "[jvmtiError %d]", err);
         _str.assign(buf);
     }
 
+    if (method_class) {
+        _jni->DeleteLocalRef(method_class);
+    }
     jvmti->Deallocate((unsigned char*)class_name);
     jvmti->Deallocate((unsigned char*)method_sig);
     jvmti->Deallocate((unsigned char*)method_name);
@@ -288,8 +285,21 @@ const char* FrameName::name(ASGCT_CallFrame& frame, bool for_matching) {
             }
         }
 
+        case BCI_ADDRESS: {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%p", frame.method_id);
+            return _str.assign(buf).c_str();
+        }
+
         case BCI_ERROR:
             return _str.assign("[").append((const char*)frame.method_id).append("]").c_str();
+
+        case BCI_CPU: {
+            int cpu = ((int)(uintptr_t)frame.method_id) & 0x7fff;
+            char buf[32];
+            snprintf(buf, sizeof(buf), "[CPU-%d]", cpu);
+            return _str.assign(buf).c_str();
+        }
 
         default: {
             const char* type_suffix = typeSuffix(FrameType::decode(frame.bci));
@@ -297,10 +307,11 @@ const char* FrameName::name(ASGCT_CallFrame& frame, bool for_matching) {
             JMethodCache::iterator it = _cache.lower_bound(frame.method_id);
             if (it != _cache.end() && it->first == frame.method_id) {
                 it->second[0] = _cache_epoch;
+                const char* name = it->second.c_str() + 1;
                 if (type_suffix != NULL) {
-                    return _str.assign(it->second, 1, std::string::npos).append(type_suffix).c_str();
+                    return _str.assign(name).append(type_suffix).c_str();
                 }
-                return it->second.c_str() + 1;
+                return name;
             }
 
             javaMethodName(frame.method_id);
@@ -322,6 +333,7 @@ FrameTypeId FrameName::type(ASGCT_CallFrame& frame) {
         case BCI_NATIVE_FRAME: {
             const char* name = (const char*)frame.method_id;
             if ((name[0] == '_' && name[1] == 'Z') ||
+                (name[0] == '_' && name[1] == 'R') ||
                 (name[0] == '+' && name[1] == '[') ||
                 (name[0] == '-' && name[1] == '[')) {
                 return FRAME_CPP;
@@ -340,7 +352,9 @@ FrameTypeId FrameName::type(ASGCT_CallFrame& frame) {
             return FRAME_KERNEL;
 
         case BCI_THREAD_ID:
+        case BCI_ADDRESS:
         case BCI_ERROR:
+        case BCI_CPU:
             return FRAME_NATIVE;
 
         default:

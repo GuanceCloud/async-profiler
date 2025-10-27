@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <fstream>
-#include <sstream>
 #include <errno.h>
 #include <string.h>
 #include "asprof.h"
@@ -15,7 +13,7 @@
 #include "vmStructs.h"
 
 
-INCBIN(SERVER_CLASS, "src/helper/one/profiler/Server.class")
+INCLUDE_HELPER_CLASS(SERVER_NAME, SERVER_CLASS, "one/profiler/Server")
 
 
 static void throwNew(JNIEnv* env, const char* exception_class, const char* message) {
@@ -33,7 +31,7 @@ Java_one_profiler_AsyncProfiler_start0(JNIEnv* env, jobject unused, jstring even
     if (strcmp(event_str, EVENT_ALLOC) == 0) {
         args._alloc = interval > 0 ? interval : 0;
     } else if (strcmp(event_str, EVENT_LOCK) == 0) {
-        args._lock = interval > 0 ? interval : 0;
+        args._lock = interval >= 0 ? interval : DEFAULT_LOCK_INTERVAL;
     } else {
         args._event = event_str;
         args._interval = interval;
@@ -71,23 +69,23 @@ Java_one_profiler_AsyncProfiler_execute0(JNIEnv* env, jobject unused, jstring co
     Log::open(args);
 
     if (!args.hasOutputFile()) {
-        std::ostringstream out;
+        BufferWriter out;
         error = Profiler::instance()->runInternal(args, out);
         if (!error) {
-            if (out.tellp() >= 0x3fffffff) {
+            out << '\0';
+            if (out.size() >= 0x3fffffff) {
                 throwNew(env, "java/lang/IllegalStateException", "Output exceeds string size limit");
                 return NULL;
             }
-            return env->NewStringUTF(out.str().c_str());
+            return env->NewStringUTF(out.buf());
         }
     } else {
-        std::ofstream out(args.file(), std::ios::out | std::ios::trunc);
+        FileWriter out(args.file());
         if (!out.is_open()) {
             throwNew(env, "java/io/IOException", strerror(errno));
             return NULL;
         }
         error = Profiler::instance()->runInternal(args, out);
-        out.close();
         if (!error) {
             return env->NewStringUTF("OK");
         }
@@ -95,6 +93,37 @@ Java_one_profiler_AsyncProfiler_execute0(JNIEnv* env, jobject unused, jstring co
 
     throwNew(env, "java/lang/IllegalStateException", error.message());
     return NULL;
+}
+
+extern "C" DLLEXPORT jbyteArray JNICALL
+Java_one_profiler_AsyncProfiler_execute1(JNIEnv* env, jobject unused, jstring command) {
+    Arguments args;
+    const char* command_str = env->GetStringUTFChars(command, NULL);
+    Error error = args.parse(command_str);
+    env->ReleaseStringUTFChars(command, command_str);
+
+    if (error) {
+        throwNew(env, "java/lang/IllegalArgumentException", error.message());
+        return NULL;
+    }
+    if (args.hasOutputFile()) {
+        throwNew(env, "java/lang/IllegalArgumentException", "execute1 calls should not specify an output file argument");
+        return NULL;
+    }
+
+    Log::open(args);
+
+    BufferWriter out;
+    // TODO: This is doing one more copy than necessary, from ProtoWriter to BufferWriter
+    error = Profiler::instance()->runInternal(args, out);
+    if (error) {
+        throwNew(env, "java/lang/IllegalStateException", error.message());
+        return NULL;
+    }
+
+    jbyteArray output = env->NewByteArray(out.size());
+    env->SetByteArrayRegion(output, 0, out.size(), (const jbyte*) out.buf());
+    return output;
 }
 
 extern "C" DLLEXPORT jlong JNICALL
@@ -126,6 +155,7 @@ static const JNINativeMethod profiler_natives[] = {
     F(start0,        "(Ljava/lang/String;JZ)V"),
     F(stop0,         "()V"),
     F(execute0,      "(Ljava/lang/String;)Ljava/lang/String;"),
+    F(execute1,      "(Ljava/lang/String;)[B"),
     F(getSamples,    "()J"),
     F(filterThread0, "(Ljava/lang/Thread;Z)V"),
 };
@@ -169,7 +199,7 @@ bool JavaAPI::startHttpServer(jvmtiEnv* jvmti, JNIEnv* jni, const char* address)
     jclass handler = jni->FindClass("com/sun/net/httpserver/HttpHandler");
     jobject loader;
     if (handler != NULL && jvmti->GetClassLoader(handler, &loader) == 0) {
-        jclass cls = jni->DefineClass(NULL, loader, (const jbyte*)SERVER_CLASS, INCBIN_SIZEOF(SERVER_CLASS));
+        jclass cls = jni->DefineClass(SERVER_NAME, loader, (const jbyte*)SERVER_CLASS, INCBIN_SIZEOF(SERVER_CLASS));
         if (cls != NULL && jni->RegisterNatives(cls, execute0, 1) == 0) {
             jmethodID method = jni->GetStaticMethodID(cls, "start", "(Ljava/lang/String;)V");
             if (method != NULL) {

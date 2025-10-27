@@ -6,3 +6,5 @@
 /test/*.class
 .vscode
 *.iml
+/src/api/**/*.class
+.gdb_history

@@ -5,6 +5,7 @@
 
 package one.proto;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 /**
@@ -51,7 +52,8 @@ public class Proto {
 
     public Proto field(int index, String s) {
         tag(index, 2);
-        writeString(s);
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+        writeBytes(bytes, 0, bytes.length);
         return this;
     }
 
@@ -67,11 +69,37 @@ public class Proto {
         return this;
     }
 
+    // 32 bits for the start position
+    // 32 bits for the max length byte count
+    public long startField(int index, int maxLenByteCount) {
+        tag(index, 2);
+        ensureCapacity(maxLenByteCount);
+        pos += maxLenByteCount;
+        return ((long) pos << 32) | maxLenByteCount;
+    }
+
+    public void commitField(long mark) {
+        int messageStart = (int) (mark >> 32);
+        int maxLenByteCount = (int) mark;
+
+        int actualLength = pos - messageStart;
+        if (actualLength >= 1L << (7 * maxLenByteCount)) {
+            throw new IllegalArgumentException("Field too large");
+        }
+
+        int lenBytesStart = messageStart - maxLenByteCount;
+        for (int i = 0; i < maxLenByteCount - 1; ++i) {
+            buf[lenBytesStart + i] = (byte) (0x80 | actualLength);
+            actualLength >>>= 7;
+        }
+        buf[lenBytesStart + maxLenByteCount - 1] = (byte) actualLength;
+    }
+
     public void writeInt(int n) {
         int length = n == 0 ? 1 : (38 - Integer.numberOfLeadingZeros(n)) / 7;
         ensureCapacity(length);
 
-        while (n > 0x7f) {
+        while ((n >>> 7) != 0) {
             buf[pos++] = (byte) (0x80 | (n & 0x7f));
             n >>>= 7;
         }
@@ -82,7 +110,7 @@ public class Proto {
         int length = n == 0 ? 1 : (70 - Long.numberOfLeadingZeros(n)) / 7;
         ensureCapacity(length);
 
-        while (n > 0x7f) {
+        while ((n >>> 7) != 0) {
             buf[pos++] = (byte) (0x80 | (n & 0x7f));
             n >>>= 7;
         }
@@ -103,16 +131,6 @@ public class Proto {
         pos += 8;
     }
 
-    public void writeString(String s) {
-        int length = s.length();
-        writeInt(length);
-        ensureCapacity(length);
-
-        for (int i = 0; i < length; i++) {
-            buf[pos++] = (byte) s.charAt(i);
-        }
-    }
-
     public void writeBytes(byte[] bytes, int offset, int length) {
         writeInt(length);
         ensureCapacity(length);
@@ -127,7 +145,8 @@ public class Proto {
 
     private void ensureCapacity(int length) {
         if (pos + length > buf.length) {
-            buf = Arrays.copyOf(buf, Math.max(pos + length, buf.length * 2));
+            int newLength = buf.length * 2;
+            buf = Arrays.copyOf(buf, newLength < 0 ? 0x7ffffff0 : Math.max(newLength, pos + length));
         }
     }
 }

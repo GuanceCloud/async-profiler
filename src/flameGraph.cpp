@@ -71,7 +71,7 @@ class Node {
     u32 _order;
     const Trie* _trie;
 
-    Node(u32 key, u32 order, const Trie& trie) : _key(key), _order(order), _trie(&trie) {
+    Node(u32 key, u32 order, const Trie* trie) : _key(key), _order(order), _trie(trie) {
     }
 
     static bool orderByName(const Node& a, const Node& b) {
@@ -111,7 +111,7 @@ Trie* FlameGraph::addChild(Trie* f, const char* name, FrameTypeId type, u64 valu
     }
 }
 
-void FlameGraph::dump(std::ostream& out, bool tree) {
+void FlameGraph::dump(Writer& out, bool tree) {
     _name_order = new u32[_cpool.size() + 1]();
     _mintotal = _minwidth == 0 && tree ? _root._total / 1000 : (u64)(_root._total * _minwidth / 100);
     int depth = _root.depth(_mintotal, _name_order);
@@ -147,8 +147,10 @@ void FlameGraph::dump(std::ostream& out, bool tree) {
         tail = printTill(out, tail, "/*title:*/");
         out << _title;
 
-        tail = printTill(out, tail, "/*reverse:*/false");
-        out << (_reverse ? "true" : "false");
+        tail = printTill(out, tail, "/*inverted:*/false");
+        // _inverted toggles the layout for reversed stacktraces from icicle to flamegraph
+        // and for default stacktraces from flamegraphs to icicle.
+        out << (_reverse ^ _inverted ? "true" : "false");
 
         tail = printTill(out, tail, "/*depth:*/0");
         out << depth;
@@ -167,7 +169,7 @@ void FlameGraph::dump(std::ostream& out, bool tree) {
     delete[] _name_order;
 }
 
-void FlameGraph::printFrame(std::ostream& out, u32 key, const Trie& f, int level, u64 x) {
+void FlameGraph::printFrame(Writer& out, u32 key, const Trie& f, int level, u64 x) {
     u32 name_and_type = _name_order[f.nameIndex(key)] << 3 | f.type(key);
     bool has_extra_types = (f._inlined | f._c1_compiled | f._interpreted) &&
                            f._inlined < f._total && f._interpreted < f._total;
@@ -201,7 +203,7 @@ void FlameGraph::printFrame(std::ostream& out, u32 key, const Trie& f, int level
 
     std::vector<Node> children;
     children.reserve(f._children.size());
-    for (std::map<u32, Trie>::const_iterator it = f._children.begin(); it != f._children.end(); ++it) {
+    for (auto it = f._children.begin(); it != f._children.end(); ++it) {
         children.push_back(Node(it->first, _name_order[f.nameIndex(it->first)], it->second));
     }
     std::sort(children.begin(), children.end(), Node::orderByName);
@@ -217,10 +219,10 @@ void FlameGraph::printFrame(std::ostream& out, u32 key, const Trie& f, int level
     }
 }
 
-void FlameGraph::printTreeFrame(std::ostream& out, const Trie& f, int level, const char** names) {
+void FlameGraph::printTreeFrame(Writer& out, const Trie& f, int level, const char** names) {
     std::vector<Node> children;
     children.reserve(f._children.size());
-    for (std::map<u32, Trie>::const_iterator it = f._children.begin(); it != f._children.end(); ++it) {
+    for (auto it = f._children.begin(); it != f._children.end(); ++it) {
         children.push_back(Node(it->first, 0, it->second));
     }
     std::sort(children.begin(), children.end(), Node::orderByTotal);
@@ -237,7 +239,7 @@ void FlameGraph::printTreeFrame(std::ostream& out, const Trie& f, int level, con
         StringUtils::replace(name, '>', "&gt;", 4);
 
         const char* div_class = trie->_children.empty() ? " class=\"o\"" : "";
-        
+
         if (_reverse) {
             snprintf(_buf, sizeof(_buf) - 1,
                      "<li><div%s>%.2f%% [%s]</div> <span class=\"t%d\">%s</span>\n",
@@ -252,7 +254,7 @@ void FlameGraph::printTreeFrame(std::ostream& out, const Trie& f, int level, con
         }
         out << _buf;
 
-        if (trie->_children.size() > 0) {
+        if (!trie->_children.empty()) {
             out << "<ul>\n";
             if (trie->_total >= _mintotal) {
                 printTreeFrame(out, *trie, level + 1, names);
@@ -264,7 +266,7 @@ void FlameGraph::printTreeFrame(std::ostream& out, const Trie& f, int level, con
     }
 }
 
-void FlameGraph::printCpool(std::ostream& out) {
+void FlameGraph::printCpool(Writer& out) {
     out << "'all'";
 
     std::string prev;
@@ -282,7 +284,9 @@ void FlameGraph::printCpool(std::ostream& out) {
 
             StringUtils::replace(s, '\\', "\\\\", 2);
             StringUtils::replace(s, '\'', "\\'", 2);
-            out << ",\n'" << s << "'";
+            out << ",\n'";
+            out.write(s.data(), s.size());
+            out << "'";
         }
     }
 
@@ -290,7 +294,7 @@ void FlameGraph::printCpool(std::ostream& out) {
     _cpool = std::map<std::string, u32>();
 }
 
-const char* FlameGraph::printTill(std::ostream& out, const char* data, const char* till) {
+const char* FlameGraph::printTill(Writer& out, const char* data, const char* till) {
     const char* pos = strstr(data, till);
     out.write(data, pos - data);
     return pos + strlen(till);

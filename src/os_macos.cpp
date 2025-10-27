@@ -5,13 +5,18 @@
 
 #ifdef __APPLE__
 
+#include <dlfcn.h>
+#include <errno.h>
 #include <libkern/OSByteOrder.h>
 #include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 #include <mach/mach_time.h>
 #include <mach/processor_info.h>
+#include <mach/vm_map.h>
+#include <mach-o/dyld.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
@@ -25,14 +30,14 @@ class MacThreadList : public ThreadList {
   private:
     task_t _task;
     thread_array_t _thread_array;
-    unsigned int _thread_count;
-    unsigned int _thread_index;
 
-    void ensureThreadArray() {
-        if (_thread_array == NULL) {
-            _thread_count = 0;
-            _thread_index = 0;
-            task_threads(_task, &_thread_array, &_thread_count);
+    void deallocate() {
+        if (_thread_array != NULL) {
+            for (u32 i = 0; i < _count; i++) {
+                mach_port_deallocate(_task, _thread_array[i]);
+            }
+            vm_deallocate(_task, (vm_address_t)_thread_array, _count * sizeof(thread_t));
+            _thread_array = NULL;
         }
     }
 
@@ -40,33 +45,21 @@ class MacThreadList : public ThreadList {
     MacThreadList() {
         _task = mach_task_self();
         _thread_array = NULL;
+        task_threads(_task, &_thread_array, &_count);
     }
 
     ~MacThreadList() {
-        rewind();
-    }
-
-    void rewind() {
-        if (_thread_array != NULL) {
-            for (int i = 0; i < _thread_count; i++) {
-                mach_port_deallocate(_task, _thread_array[i]);
-            }
-            vm_deallocate(_task, (vm_address_t)_thread_array, _thread_count * sizeof(thread_t));
-            _thread_array = NULL;
-        }
+        deallocate();
     }
 
     int next() {
-        ensureThreadArray();
-        if (_thread_index < _thread_count) {
-            return (int)_thread_array[_thread_index++];
-        }
-        return -1;
+        return (int)_thread_array[_index++];
     }
 
-    int size() {
-        ensureThreadArray();
-        return _thread_count;
+    void update() {
+        deallocate();
+        _index = _count = 0;
+        task_threads(_task, &_thread_array, &_count);
     }
 };
 
@@ -104,8 +97,13 @@ JitWriteProtection::~JitWriteProtection() {
 }
 
 
+static SigAction installed_sigaction[32];
+static SigAction orig_sigbus_handler;
+static SigAction orig_sigsegv_handler;
+
 const size_t OS::page_size = sysconf(_SC_PAGESIZE);
 const size_t OS::page_mask = OS::page_size - 1;
+const long OS::clock_ticks_per_sec = sysconf(_SC_CLK_TCK);
 
 static mach_timebase_info_data_t timebase = {0, 0};
 
@@ -125,6 +123,15 @@ u64 OS::micros() {
 void OS::sleep(u64 nanos) {
     struct timespec ts = {(time_t)(nanos / 1000000000), (long)(nanos % 1000000000)};
     nanosleep(&ts, NULL);
+}
+
+void OS::uninterruptibleSleep(u64 nanos, volatile bool* flag) {
+    struct timespec ts = {(time_t)(nanos / 1000000000), (long)(nanos % 1000000000)};
+    while (*flag && nanosleep(&ts, &ts) < 0 && errno == EINTR);
+}
+
+u64 OS::overrun(siginfo_t* siginfo) {
+    return 0;
 }
 
 u64 OS::processStartTime() {
@@ -185,11 +192,27 @@ ThreadState OS::threadState(int thread_id) {
     return info.run_state == TH_STATE_RUNNING ? THREAD_RUNNING : THREAD_SLEEPING;
 }
 
+u64 OS::threadCpuTime(int thread_id) {
+    if (thread_id == 0) thread_id = threadId();
+
+    struct thread_basic_info info;
+    mach_msg_type_number_t size = sizeof(info);
+    if (thread_info((thread_act_t)thread_id, THREAD_BASIC_INFO, (thread_info_t)&info, &size) != 0) {
+        return 0;
+    }
+    return u64(info.user_time.seconds + info.system_time.seconds) * 1000000000 +
+           u64(info.user_time.microseconds + info.system_time.microseconds) * 1000;
+}
+
 ThreadList* OS::listThreads() {
     return new MacThreadList();
 }
 
 bool OS::isLinux() {
+    return false;
+}
+
+bool OS::isMusl() {
     return false;
 }
 
@@ -204,19 +227,63 @@ SigAction OS::installSignalHandler(int signo, SigAction action, SigHandler handl
     } else {
         sa.sa_sigaction = action;
         sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        if (signo > 0 && signo < sizeof(installed_sigaction) / sizeof(installed_sigaction[0])) {
+            installed_sigaction[signo] = action;
+        }
     }
 
     sigaction(signo, &sa, &oldsa);
     return oldsa.sa_sigaction;
 }
 
+static void restoreSignalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
+    signal(signo, SIG_DFL);
+}
+
 SigAction OS::replaceCrashHandler(SigAction action) {
+    // It is not well specified when macOS raises SIGBUS and when SIGSEGV.
+    // HotSpot handles both similarly, so do we.
     struct sigaction sa;
+
     sigaction(SIGBUS, NULL, &sa);
-    SigAction old_action = sa.sa_sigaction;
+    orig_sigbus_handler = sa.sa_handler == SIG_DFL ? restoreSignalHandler : sa.sa_sigaction;
     sa.sa_sigaction = action;
+    sa.sa_flags |= SA_SIGINFO | SA_RESTART;
     sigaction(SIGBUS, &sa, NULL);
-    return old_action;
+
+    sigaction(SIGSEGV, NULL, &sa);
+    orig_sigsegv_handler = sa.sa_handler == SIG_DFL ? restoreSignalHandler : sa.sa_sigaction;
+    sa.sa_sigaction = action;
+    sa.sa_flags |= SA_SIGINFO | SA_RESTART;
+    sigaction(SIGSEGV, &sa, NULL);
+
+    // Return an action that dispatches to one of the original handlers depending on signo,
+    // so that the caller does not need to deal with multiple handlers
+    return [](int signo, siginfo_t* siginfo, void* ucontext) {
+        (signo == SIGBUS ? orig_sigbus_handler : orig_sigsegv_handler)(signo, siginfo, ucontext);
+    };
+}
+
+int OS::getProfilingSignal(int mode) {
+    static int preferred_signals[2] = {SIGPROF, SIGVTALRM};
+
+    const u64 allowed_signals =
+        1ULL << SIGPROF | 1ULL << SIGVTALRM | 1ULL << SIGEMT | 1ULL << SIGSYS;
+
+    int& signo = preferred_signals[mode];
+    int initial_signo = signo;
+    int other_signo = preferred_signals[1 - mode];
+
+    do {
+        struct sigaction sa;
+        if ((allowed_signals & (1ULL << signo)) != 0 && signo != other_signo && sigaction(signo, NULL, &sa) == 0) {
+            if (sa.sa_handler == SIG_DFL || sa.sa_handler == SIG_IGN || sa.sa_sigaction == installed_sigaction[signo]) {
+                return signo;
+            }
+        }
+    } while ((signo = (signo + 1) & 31) != initial_signo);
+
+    return signo;
 }
 
 bool OS::sendSignalToThread(int thread_id, int signo) {
@@ -299,6 +366,11 @@ u64 OS::getTotalCpuTime(u64* utime, u64* stime) {
     return user + system + idle;
 }
 
+int OS::createMemoryFile(const char* name) {
+    // Not supported on macOS
+    return -1;
+}
+
 void OS::copyFile(int src_fd, int dst_fd, off_t offset, size_t size) {
     char* buf = (char*)mmap(NULL, size + offset, PROT_READ, MAP_PRIVATE, src_fd, 0);
     if (buf == NULL) {
@@ -319,6 +391,66 @@ void OS::copyFile(int src_fd, int dst_fd, off_t offset, size_t size) {
 
 void OS::freePageCache(int fd, off_t start_offset) {
     // Not supported on macOS
+}
+
+int OS::mprotect(void* addr, size_t size, int prot) {
+    if (prot & PROT_WRITE) prot |= VM_PROT_COPY;
+    return vm_protect(mach_task_self(), (vm_address_t)addr, size, 0, prot);
+}
+
+// Checks if async-profiler is preloaded through the DYLD_INSERT_LIBRARIES mechanism.
+// This is done by analyzing the order of loaded dynamic libraries.
+bool OS::checkPreloaded() {
+    if (getenv("DYLD_INSERT_LIBRARIES") == NULL) {
+        return false;
+    }
+
+    // Find async-profiler shared object
+    Dl_info libprofiler;
+    if (dladdr((const void*)OS::checkPreloaded, &libprofiler) == 0) {
+        return false;
+    }
+
+    // Find libc shared object
+    Dl_info libc;
+    if (dladdr((const void*)exit, &libc) == 0) {
+        return false;
+    }
+
+    uint32_t images = _dyld_image_count();
+    for (uint32_t i = 0; i < images; i++) {
+        void* image_base = (void*)_dyld_get_image_header(i);
+
+        if (image_base == libprofiler.dli_fbase) {
+            // async-profiler found first
+            return true;
+        } else if (image_base == libc.dli_fbase) {
+            // libc found first
+            return false;
+        }
+    }
+
+    return false;
+}
+
+u64 OS::getSystemBootTime() {
+    return 0;
+}
+
+u64 OS::getRamSize() {
+    return 0;
+}
+
+int OS::getProcessIds(int* pids, int max_pids) {
+    return 0;
+}
+
+bool OS::getBasicProcessInfo(int pid, ProcessInfo* info) {
+    return false;
+}
+
+bool OS::getDetailedProcessInfo(ProcessInfo* info) {
+    return false;
 }
 
 #endif // __APPLE__

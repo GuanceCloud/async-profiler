@@ -38,7 +38,7 @@ int CTimer::createForThread(int tid) {
     sev.sigev_value.sival_ptr = NULL;
     sev.sigev_signo = _signal;
     sev.sigev_notify = SIGEV_THREAD_ID;
-    ((int*)&sev.sigev_notify)[1] = tid;
+    (&sev.sigev_notify)[1] = tid;
 
     // Use raw syscalls, since libc wrapper allows only predefined clocks
     clockid_t clock = thread_cpu_clock(tid);
@@ -97,7 +97,8 @@ Error CTimer::start(Arguments& args) {
     }
     _interval = args._interval ? args._interval : DEFAULT_INTERVAL;
     _cstack = args._cstack;
-    _signal = args._signal == 0 ? SIGPROF : args._signal & 0xff;
+    _signal = args._signal == 0 ? OS::getProfilingSignal(0) : args._signal & 0xff;
+    _count_overrun = true;
 
     int max_timers = OS::getMaxThreadId();
     if (max_timers != _max_timers) {
@@ -107,7 +108,6 @@ Error CTimer::start(Arguments& args) {
     }
 
     if (VM::isOpenJ9()) {
-        if (_cstack == CSTACK_DEFAULT) _cstack = CSTACK_DWARF;
         OS::installSignalHandler(_signal, signalHandlerJ9);
         Error error = J9StackTraces::start(args);
         if (error) {

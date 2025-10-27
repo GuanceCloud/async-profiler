@@ -6,22 +6,28 @@
 #ifndef _FLAMEGRAPH_H
 #define _FLAMEGRAPH_H
 
-#include <iostream>
 #include <map>
 #include <string>
 #include "arch.h"
 #include "arguments.h"
 #include "vmEntry.h"
+#include "writer.h"
 
 
 class Trie {
   public:
-    std::map<u32, Trie> _children;
+    std::map<u32, Trie*> _children;
     u64 _total;
     u64 _self;
     u64 _inlined, _c1_compiled, _interpreted;
 
     Trie() : _children(), _total(0), _self(0), _inlined(0), _c1_compiled(0), _interpreted(0) {
+    }
+
+    ~Trie() {
+        for (const auto& entry : _children) {
+            delete entry.second;
+        }
     }
 
     FrameTypeId type(u32 key) const {
@@ -41,15 +47,19 @@ class Trie {
     }
 
     Trie* child(u32 name_index, FrameTypeId type) {
-        return &_children[name_index | type << 28];
+        Trie** ptr = &_children[name_index | type << 28];
+        if (*ptr == nullptr) {
+            *ptr = new Trie();
+        }
+        return *ptr;
     }
 
     int depth(u64 cutoff, u32* name_order) const {
         int max_depth = 0;
-        for (std::map<u32, Trie>::const_iterator it = _children.begin(); it != _children.end(); ++it) {
-            if (it->second._total >= cutoff) {
+        for (auto it = _children.begin(); it != _children.end(); ++it) {
+            if (it->second->_total >= cutoff) {
                 name_order[nameIndex(it->first)] = 1;
-                int d = it->second.depth(cutoff, name_order);
+                int d = it->second->depth(cutoff, name_order);
                 if (d > max_depth) max_depth = d;
             }
         }
@@ -70,24 +80,26 @@ class FlameGraph {
     Counter _counter;
     double _minwidth;
     bool _reverse;
+    bool _inverted;
 
     int _last_level;
     u64 _last_x;
     u64 _last_total;
 
-    void printFrame(std::ostream& out, u32 key, const Trie& f, int level, u64 x);
-    void printTreeFrame(std::ostream& out, const Trie& f, int level, const char** names);
-    void printCpool(std::ostream& out);
-    const char* printTill(std::ostream& out, const char* data, const char* till);
+    void printFrame(Writer& out, u32 key, const Trie& f, int level, u64 x);
+    void printTreeFrame(Writer& out, const Trie& f, int level, const char** names);
+    void printCpool(Writer& out);
+    const char* printTill(Writer& out, const char* data, const char* till);
 
   public:
-    FlameGraph(const char* title, Counter counter, double minwidth, bool reverse) :
+    FlameGraph(const char* title, Counter counter, double minwidth, bool reverse, bool inverted) :
         _root(),
         _cpool(),
         _title(title),
         _counter(counter),
         _minwidth(minwidth),
         _reverse(reverse),
+        _inverted(inverted),
         _last_level(0),
         _last_x(0),
         _last_total(0) {
@@ -100,7 +112,7 @@ class FlameGraph {
 
     Trie* addChild(Trie* f, const char* name, FrameTypeId type, u64 value);
 
-    void dump(std::ostream& out, bool tree);
+    void dump(Writer& out, bool tree);
 };
 
 #endif // _FLAMEGRAPH_H

@@ -7,9 +7,9 @@
 #include <pthread.h>
 #include "cpuEngine.h"
 #include "j9StackTraces.h"
-#include "os.h"
 #include "profiler.h"
 #include "stackWalker.h"
+#include "tsc.h"
 #include "vmStructs.h"
 
 
@@ -19,6 +19,7 @@ CpuEngine* CpuEngine::_current = NULL;
 long CpuEngine::_interval;
 CStack CpuEngine::_cstack;
 int CpuEngine::_signal;
+bool CpuEngine::_count_overrun;
 
 // Intercept thread creation/termination by patching libjvm's GOT entry for pthread_setspecific().
 // HotSpot puts VMThread into TLS on thread start, and resets on thread end.
@@ -95,7 +96,8 @@ int CpuEngine::createForAllThreads() {
     int result = EPERM;
 
     ThreadList* thread_list = OS::listThreads();
-    for (int tid; (tid = thread_list->next()) != -1; ) {
+    while (thread_list->hasNext()) {
+        int tid = thread_list->next();
         int err = createForThread(tid);
         if (isResourceLimit(err)) {
             result = err;
@@ -112,8 +114,10 @@ int CpuEngine::createForAllThreads() {
 void CpuEngine::signalHandler(int signo, siginfo_t* siginfo, void* ucontext) {
     if (!_enabled) return;
 
-    ExecutionEvent event;
-    Profiler::instance()->recordSample(ucontext, _interval, EXECUTION_SAMPLE, &event);
+    ExecutionEvent event(TSC::ticks());
+    // Count missed samples when estimating total CPU time
+    u64 total_cpu_time = _count_overrun ? u64(_interval) * (1 + OS::overrun(siginfo)) : u64(_interval);
+    Profiler::instance()->recordSample(ucontext, total_cpu_time, EXECUTION_SAMPLE, &event);
 }
 
 void CpuEngine::signalHandlerJ9(int signo, siginfo_t* siginfo, void* ucontext) {

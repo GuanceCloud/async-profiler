@@ -31,16 +31,31 @@ jvmtiEnv* VM::_jvmti = NULL;
 int VM::_hotspot_version = 0;
 bool VM::_openj9 = false;
 bool VM::_zing = false;
-bool VM::_can_sample_objects = false;
+
+bool VM::_terminating = false;
+
+GetCreatedJavaVMs VM::_getCreatedJavaVMs = NULL;
 
 jvmtiError (JNICALL *VM::_orig_RedefineClasses)(jvmtiEnv*, jint, const jvmtiClassDefinition*);
 jvmtiError (JNICALL *VM::_orig_RetransformClasses)(jvmtiEnv*, jint, const jclass* classes);
 
 AsyncGetCallTrace VM::_asyncGetCallTrace;
-JVM_GetManagement VM::_getManagement;
 JVM_MemoryFunc VM::_totalMemory;
 JVM_MemoryFunc VM::_freeMemory;
 
+static bool isVmRuntimeEntry(const char* blob_name) {
+    return strcmp(blob_name, "_ZNK12MemAllocator8allocateEv") == 0
+        || strncmp(blob_name, "_Z22post_allocation_notify", 26) == 0
+        || strncmp(blob_name, "_ZN11OptoRuntime", 16) == 0
+        || strncmp(blob_name, "_ZN8Runtime1", 12) == 0
+        || strncmp(blob_name, "_ZN13SharedRuntime", 18) == 0
+        || strncmp(blob_name, "_ZN18InterpreterRuntime", 23) == 0;
+}
+
+static bool isZingRuntimeEntry(const char* blob_name) {
+    return strncmp(blob_name, "_ZN14DolphinRuntime", 19) == 0
+        || strncmp(blob_name, "_ZN37JvmtiSampledObjectAllocEventCollector", 42) == 0;
+}
 
 static bool isZeroInterpreterMethod(const char* blob_name) {
     return strncmp(blob_name, "_ZN15ZeroInterpreter", 20) == 0
@@ -59,22 +74,66 @@ static bool isOpenJ9JitStub(const char* blob_name) {
         blob_name += 3;
         return strcmp(blob_name, "NewObject") == 0
             || strcmp(blob_name, "NewArray") == 0
-            || strcmp(blob_name, "ANewArray") == 0;
+            || strcmp(blob_name, "ANewArray") == 0
+            || strcmp(blob_name, "AMultiNewArray") == 0;
     }
     return false;
 }
 
+static bool isOpenJ9Resolve(const char* blob_name) {
+    return strncmp(blob_name, "resolve", 7) == 0;
+}
+
+static bool isOpenJ9JitAlloc(const char* blob_name) {
+    return strncmp(blob_name, "old_", 4) == 0;
+}
+
+static bool isOpenJ9GcAlloc(const char* blob_name) {
+    return strncmp(blob_name, "J9Allocate", 10) == 0;
+}
+
+static bool isOpenJ9JvmtiAlloc(const char* blob_name) {
+    return strcmp(blob_name, "jvmtiHookSampledObjectAlloc") == 0 ||
+           strcmp(blob_name, "jvmtiHookObjectAllocate") == 0;
+}
+
 static bool isCompilerEntry(const char* blob_name) {
-    return strncmp(blob_name, "_ZN13CompileBroker25invoke_compiler_on_method", 45) == 0;
+    return strncmp(blob_name, "_ZN8Compiler14compile_method", 28) == 0 ||
+           strncmp(blob_name, "_ZN10C2Compiler14compile_method", 31) == 0;
 }
 
 static void* resolveMethodId(void** mid) {
     return mid == NULL || *mid < (void*)4096 ? NULL : *mid;
 }
 
-static void resolveMethodIdEnd() {
+static void* resolveMethodIdEnd() {
+    return NULL;
 }
 
+// Workaround for JDK-8308341: since JNI_GetCreatedJavaVMs may return an uninitialized JVM,
+// we verify the readiness of the JVM by presence of "VM Thread" and "Service Thread".
+bool VM::hasJvmThreads() {
+    char thread_name[32];
+    int threads_found = 0;
+
+    ThreadList* list = OS::listThreads();
+    while (list->hasNext() && threads_found != 3) {
+        if (!OS::threadName(list->next(), thread_name, sizeof(thread_name))) {
+            continue;
+        }
+
+        // On macOS, Java thread names start with "Java: "
+        int thread_name_offset = strncmp(thread_name, "Java: ", 6) == 0 ? 6 : 0;
+
+        if (strcmp(thread_name + thread_name_offset, "VM Thread") == 0) {
+            threads_found |= 1;
+        } else if (strcmp(thread_name + thread_name_offset, "Service Thread") == 0) {
+            threads_found |= 2;
+        }
+    }
+
+    return threads_found == 3;
+}
 
 bool VM::init(JavaVM* vm, bool attach) {
     if (_jvmti != NULL) return true;
@@ -82,13 +141,6 @@ bool VM::init(JavaVM* vm, bool attach) {
     _vm = vm;
     if (_vm->GetEnv((void**)&_jvmti, JVMTI_VERSION_1_0) != 0) {
         return false;
-    }
-
-    Dl_info dl_info;
-    if (dladdr((const void*)resolveMethodId, &dl_info) && dl_info.dli_fname != NULL) {
-        // Make sure async-profiler DSO cannot be unloaded, since it contains JVM callbacks.
-        // Don't use ELF NODELETE flag because of https://sourceware.org/bugzilla/show_bug.cgi?id=20839
-        dlopen(dl_info.dli_fname, RTLD_LAZY | RTLD_NODELETE);
     }
 
     bool is_hotspot = false;
@@ -124,34 +176,47 @@ bool VM::init(JavaVM* vm, bool attach) {
         libjvm = RTLD_DEFAULT;
     }
     _asyncGetCallTrace = (AsyncGetCallTrace)dlsym(libjvm, "AsyncGetCallTrace");
-    _getManagement = (JVM_GetManagement)dlsym(libjvm, "JVM_GetManagement");
     _totalMemory = (JVM_MemoryFunc)dlsym(libjvm, "JVM_TotalMemory");
     _freeMemory = (JVM_MemoryFunc)dlsym(libjvm, "JVM_FreeMemory");
 
     Profiler* profiler = Profiler::instance();
-    profiler->updateSymbols(false);
+    if (VMStructs::libjvm() == NULL) {
+        profiler->updateSymbols(false);
+        VMStructs::init(profiler->findLibraryByAddress((const void*)_asyncGetCallTrace));
+    }
 
     _openj9 = !is_hotspot && J9Ext::initialize(_jvmti, profiler->resolveSymbol("j9thread_self"));
-    _can_sample_objects = !is_hotspot || hotspot_version() >= 11;
 
-    CodeCache* lib = isOpenJ9()
-        ? profiler->findJvmLibrary("libj9vm")
-        : profiler->findLibraryByAddress((const void*)_asyncGetCallTrace);
+    CodeCache* lib = profiler->findJvmLibrary("libj9vm");
     if (lib == NULL) {
         return false;
     }
 
-    VMStructs::init(lib);
-    if (is_zero_vm) {
-        lib->mark(isZeroInterpreterMethod, MARK_INTERPRETER);
-    } else if (isOpenJ9()) {
+    if (isOpenJ9()) {
         lib->mark(isOpenJ9InterpreterMethod, MARK_INTERPRETER);
+        lib->mark(isOpenJ9Resolve, MARK_VM_RUNTIME);
         CodeCache* libjit = profiler->findJvmLibrary("libj9jit");
         if (libjit != NULL) {
             libjit->mark(isOpenJ9JitStub, MARK_INTERPRETER);
+            libjit->mark(isOpenJ9JitAlloc, MARK_VM_RUNTIME);
+        }
+        CodeCache* libgc = profiler->findJvmLibrary("libj9gc");
+        if (libgc != NULL) {
+            libgc->mark(isOpenJ9GcAlloc, MARK_VM_RUNTIME);
+        }
+        CodeCache* libjvmti = profiler->findJvmLibrary("libj9jvmti");
+        if (libjvmti != NULL) {
+            libjvmti->mark(isOpenJ9JvmtiAlloc, MARK_VM_RUNTIME);
         }
     } else {
-        lib->mark(isCompilerEntry, MARK_COMPILER_ENTRY);
+        lib->mark(isVmRuntimeEntry, MARK_VM_RUNTIME);
+        if (isZing()) {
+            lib->mark(isZingRuntimeEntry, MARK_VM_RUNTIME);
+        } else if (is_zero_vm) {
+            lib->mark(isZeroInterpreterMethod, MARK_INTERPRETER);
+        } else {
+            lib->mark(isCompilerEntry, MARK_COMPILER_ENTRY);
+        }
     }
 
     if (!attach && hotspot_version() == 8 && OS::isLinux()) {
@@ -171,7 +236,6 @@ bool VM::init(JavaVM* vm, bool attach) {
     capabilities.can_retransform_classes = 1;
     capabilities.can_retransform_any_class = isOpenJ9() ? 0 : 1;
     capabilities.can_generate_vm_object_alloc_events = isOpenJ9() ? 1 : 0;
-    capabilities.can_generate_sampled_object_alloc_events = _can_sample_objects ? 1 : 0;
     capabilities.can_get_bytecodes = 1;
     capabilities.can_get_constant_pool = 1;
     capabilities.can_get_source_file_name = 1;
@@ -180,11 +244,7 @@ bool VM::init(JavaVM* vm, bool attach) {
     capabilities.can_generate_monitor_events = 1;
     capabilities.can_generate_garbage_collection_events = 1;
     capabilities.can_tag_objects = 1;
-    if (_jvmti->AddCapabilities(&capabilities) != 0) {
-        _can_sample_objects = false;
-        capabilities.can_generate_sampled_object_alloc_events = 0;
-        _jvmti->AddCapabilities(&capabilities);
-    }
+    _jvmti->AddCapabilities(&capabilities);
 
     jvmtiEventCallbacks callbacks = {0};
     callbacks.VMInit = VMInit;
@@ -216,19 +276,20 @@ bool VM::init(JavaVM* vm, bool attach) {
     } else {
         // DebugNonSafepoints is automatically enabled with CompiledMethodLoad,
         // otherwise we set the flag manually
-        char* flag_addr = (char*)JVMFlag::find("DebugNonSafepoints");
-        if (flag_addr != NULL) {
-            *flag_addr = 1;
+        JVMFlag* f = JVMFlag::find("DebugNonSafepoints");
+        if (f != NULL && f->isDefault()) {
+            f->set(1);
         }
     }
 
-    if (_can_sample_objects) {
+    if (addSampleObjectsCapability()) {
         // SetHeapSamplingInterval does not have immediate effect, so apply the configuration
         // as early as possible to allow profiling all startup allocations
-        char* use_tlab = (char*)JVMFlag::find("UseTLAB");
-        if (use_tlab != NULL && *use_tlab == 0) {
+        JVMFlag* f = JVMFlag::find("UseTLAB");
+        if (f != NULL && !f->get()) {
             _jvmti->SetHeapSamplingInterval(0);
         }
+        VM::releaseSampleObjectsCapability();
     }
 
     if (attach) {
@@ -240,6 +301,38 @@ bool VM::init(JavaVM* vm, bool attach) {
     }
 
     return true;
+}
+
+// Try to find a running JVM instance and attach to it
+void VM::tryAttach() {
+    if (_getCreatedJavaVMs == NULL) {
+        void* lib_handle = dlopen(OS::isLinux() ? "libjvm.so" : "libjvm.dylib", RTLD_LAZY | RTLD_NOLOAD);
+        if (lib_handle != NULL) {
+            _getCreatedJavaVMs = (GetCreatedJavaVMs)dlsym(lib_handle, "JNI_GetCreatedJavaVMs");
+            dlclose(lib_handle);
+        }
+        if (_getCreatedJavaVMs == NULL) {
+            return;
+        }
+    }
+
+    JavaVM* vm;
+    jsize nVMs;
+    if (_getCreatedJavaVMs(&vm, 1, &nVMs) != JNI_OK || nVMs != 1) {
+        return;
+    }
+
+    JNIEnv* env;
+    jint get_env_result = vm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (get_env_result == JNI_OK) {
+        // Current thread already belongs to the running JVM
+        VM::init(vm, true);
+    } else if (get_env_result == JNI_EDETACHED) {
+        // There is a running JVM, but we need to check it is initialized
+        if (hasJvmThreads() && vm->AttachCurrentThreadAsDaemon((void**)&env, NULL) == JNI_OK) {
+            VM::init(vm, true);
+        }
+    }
 }
 
 // Run late initialization when JVM is ready
@@ -264,10 +357,10 @@ void VM::applyPatch(char* func, const char* patch, const char* end_patch) {
     uintptr_t start_page = (uintptr_t)func & ~OS::page_mask;
     uintptr_t end_page = ((uintptr_t)func + size + OS::page_mask) & ~OS::page_mask;
 
-    if (mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+    if (OS::mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
         memcpy(func, patch, size);
         __builtin___clear_cache(func, func + size);
-        mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_EXEC);
+        OS::mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_EXEC);
     }
 }
 
@@ -328,6 +421,7 @@ void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
 }
 
 void JNICALL VM::VMDeath(jvmtiEnv* jvmti, JNIEnv* jni) {
+    _terminating = true;
     Profiler::instance()->shutdown(_global_args);
 }
 
