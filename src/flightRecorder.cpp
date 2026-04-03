@@ -58,8 +58,9 @@ static jclass _jfr_sync_class = NULL;
 static jmethodID _start_method;
 static jmethodID _stop_method;
 static jmethodID _box_method;
+static bool _jfr_starting = false;
 
-static const char* const SETTING_CSTACK[] = {NULL, "no", "fp", "dwarf", "lbr", "vm"};
+static const char* const SETTING_CSTACK[] = {NULL, "no", "fp", "dwarf", "vm"};
 
 
 struct CpuTime {
@@ -538,28 +539,21 @@ class Recording {
         return true;
     }
 
-    static const char* getFeaturesString(char* str, size_t size, StackWalkFeatures& f) {
-        snprintf(str, size, "%s %s %s %s %s %s %s %s %s %s %s %s %s",
-                 f.unknown_java  ? "unknown_java"  : "-",
-                 f.unwind_stub   ? "unwind_stub"   : "-",
-                 f.unwind_comp   ? "unwind_comp"   : "-",
-                 f.unwind_native ? "unwind_native" : "-",
-                 f.java_anchor   ? "java_anchor"   : "-",
-                 f.gc_traces     ? "gc_traces"     : "-",
-                 f.stats         ? "stats"         : "-",
-                 f.jnienv        ? "jnienv"        : "-",
-                 f.probe_sp      ? "probesp"       : "-",
-                 f.mixed         ? "mixed"         : "-",
-                 f.vtable_target ? "vtable"        : "-",
-                 f.comp_task     ? "comptask"      : "-",
-                 f.pc_addr       ? "pcaddr"        : "-");
-        return str;
+    static const char* getFeaturesString(char* str, size_t size, StackWalkFeatures f) {
+        int chars = snprintf(str, size, "%s%s%s%s%s%s",
+            f.stats         ? ",stats"    : "",
+            f.jnienv        ? ",jnienv"   : "",
+            f.mixed         ? ",mixed"    : "",
+            f.vtable_target ? ",vtable"   : "",
+            f.comp_task     ? ",comptask" : "",
+            f.pc_addr       ? ",pcaddr"   : "");
+        return chars > 0 ? str + 1 : "";
     }
 
     void flush(Buffer* buf) {
         ssize_t result = write(_in_memory ? _memfd : _fd, buf->data(), buf->offset());
         if (result > 0) {
-            atomicInc(_bytes_written, result);
+            atomicInc(_bytes_written, (u64)result);
         }
         buf->reset();
     }
@@ -649,6 +643,7 @@ class Recording {
         writeIntSetting(buf, T_ACTIVE_RECORDING, "jfropts", args._jfr_options);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "chunksize", args._chunk_size);
         writeIntSetting(buf, T_ACTIVE_RECORDING, "chunktime", args._chunk_time);
+        writeIntSetting(buf, T_ACTIVE_RECORDING, "memlimit", args._mem_limit);
 
         char str[256];
         writeStringSetting(buf, T_ACTIVE_RECORDING, "features", getFeaturesString(str, sizeof(str), args._features));
@@ -664,6 +659,9 @@ class Recording {
         }
         if (args._nativemem >= 0) {
             writeIntSetting(buf, T_MALLOC, "nativemem", args._nativemem);
+        }
+        if (args._nativelock >= 0) {
+            writeIntSetting(buf, T_NATIVE_LOCK, "nativelock", args._nativelock);
         }
 
         writeBoolSetting(buf, T_ALLOC_IN_NEW_TLAB, "enabled", args._alloc >= 0);
@@ -1070,6 +1068,7 @@ class Recording {
         buf->putVar32(call_trace_id);
         buf->putVar32(event->_thread_state);
         buf->putVar32(event->_samples);
+        buf->putVar64(event->_time_span);
         buf->put8(start, buf->offset() - start);
     }
 
@@ -1197,6 +1196,17 @@ class Recording {
         buf->putVar32(event->_class_id);
         buf->putVar64(event->_timeout);
         buf->putVar64(MIN_JLONG);
+        buf->putVar64(event->_address);
+        buf->put8(start, buf->offset() - start);
+    }
+
+    void recordNativeLockSample(Buffer* buf, int tid, u32 call_trace_id, NativeLockEvent* event) {
+        int start = buf->skip(1);
+        buf->put8(T_NATIVE_LOCK);
+        buf->putVar64(event->_start_time);
+        buf->putVar64(event->_end_time - event->_start_time);
+        buf->putVar32(tid);
+        buf->putVar32(call_trace_id);
         buf->putVar64(event->_address);
         buf->put8(start, buf->offset() - start);
     }
@@ -1351,7 +1361,7 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
         jclass cls = env->DefineClass(JFR_SYNC_NAME, NULL, (const jbyte*)JFR_SYNC_CLASS, INCBIN_SIZEOF(JFR_SYNC_CLASS));
         if (cls == NULL || env->RegisterNatives(cls, &native_method, 1) != 0
                 || (_start_method = env->GetStaticMethodID(cls, "start", "(Ljava/lang/String;Ljava/lang/String;I)V")) == NULL
-                || (_stop_method = env->GetStaticMethodID(cls, "stop", "()V")) == NULL
+                || (_stop_method = env->GetStaticMethodID(cls, "stop", "()Z")) == NULL
                 || (_box_method = env->GetStaticMethodID(cls, "box", "(I)Ljava/lang/Integer;")) == NULL
                 || (_jfr_sync_class = (jclass)env->NewGlobalRef(cls)) == NULL) {
             env->ExceptionDescribe();
@@ -1387,7 +1397,9 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
     int event_mask = args.eventMask() |
                      ((args._jfr_options ^ JFR_SYNC_OPTS) << EVENT_MASK_SIZE);
 
+    storeRelease(_jfr_starting, true);
     env->CallStaticVoidMethod(_jfr_sync_class, _start_method, jfilename, jsettings, event_mask);
+    storeRelease(_jfr_starting, false);
 
     if (env->ExceptionCheck()) {
         env->ExceptionDescribe();
@@ -1399,7 +1411,9 @@ Error FlightRecorder::startMasterRecording(Arguments& args, const char* filename
 
 void FlightRecorder::stopMasterRecording() {
     JNIEnv* env = VM::jni();
-    env->CallStaticVoidMethod(_jfr_sync_class, _stop_method);
+    if (env->CallStaticBooleanMethod(_jfr_sync_class, _stop_method) == JNI_FALSE) {
+        Log::warn("Failed to stop JFR recording");
+    }
     env->ExceptionClear();
 }
 
@@ -1441,6 +1455,9 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
             case PARK_SAMPLE:
                 _rec->recordThreadPark(buf, tid, call_trace_id, (LockEvent*)event);
                 break;
+            case NATIVE_LOCK_SAMPLE:
+                _rec->recordNativeLockSample(buf, tid, call_trace_id, (NativeLockEvent*)event);
+                break;
             case PROFILING_WINDOW:
                 _rec->recordWindow(buf, tid, (ProfilingWindow*)event);
                 break;
@@ -1472,4 +1489,8 @@ void FlightRecorder::recordLog(LogLevel level, const char* message, size_t len) 
     _rec->flush(buf);
 
     _rec_lock.unlockShared();
+}
+
+bool FlightRecorder::isJfrStarting() {
+    return loadAcquire(_jfr_starting);
 }

@@ -107,32 +107,32 @@ static inline bool isZeroSizeFrame(const char* name) {
             return strncmp(name, "atomic", 6) == 0;
         case 'b':
             return strncmp(name, "bigInteger", 10) == 0
-                || strcmp(name, "base64_encodeBlock") == 0;
+                || strncmp(name, "base64_encodeBlock", 18) == 0
+                || strcmp(name, "backward_copy_longs") == 0;
         case 'c':
             return strncmp(name, "copy_", 5) == 0
                 || strncmp(name, "compare_long_string_", 20) == 0;
         case 'e':
             return strcmp(name, "encodeBlock") == 0;
         case 'f':
-            return strcmp(name, "f2hf") == 0;
+            return strncmp(name, "f2hf", 4) == 0
+                || strcmp(name, "forward_copy_longs") == 0
+                || strcmp(name, "foward_copy_longs") == 0;  // there is a typo in JDK 8
         case 'g':
-            return strcmp(name, "ghash_processBlocks") == 0;
+            return strncmp(name, "ghash_processBlocks", 19) == 0 && strchr(name + 19, 'w') == NULL;
         case 'h':
-            return strcmp(name, "hf2f") == 0;
+            return strncmp(name, "hf2f", 4) == 0;
         case 'i':
             return strncmp(name, "itable", 6) == 0;
         case 'l':
-            return strcmp(name, "large_byte_array_inflate") == 0
+            return strncmp(name, "large_byte_array_inflate", 24) == 0
                 || strncmp(name, "lookup_secondary_supers_", 24) == 0;
         case 'm':
             return strncmp(name, "md5_implCompress", 16) == 0;
         case 's':
-            return strncmp(name, "sha1_implCompress", 17) == 0
-                || strncmp(name, "compare_long_string_same_encoding", 33) == 0
-                || strcmp(name, "compare_long_string_LL") == 0
-                || strcmp(name, "compare_long_string_UU") == 0;
+            return strncmp(name, "sha1_implCompress", 17) == 0;
         case 'u':
-            return strcmp(name, "updateBytesAdler32") == 0;
+            return strncmp(name, "updateBytesAdler32", 18) == 0;
         case 'v':
             return strncmp(name, "vtable", 6) == 0;
         case 'z':
@@ -172,56 +172,8 @@ bool StackFrame::unwindStub(instruction_t* entry, const char* name, uintptr_t& p
         // Should be done after isSTP check, since frame size may vary between JVM versions
         pc = link();
         return true;
-    } else if (strcmp(name, "forward_copy_longs") == 0
-            || strcmp(name, "backward_copy_longs") == 0
-            // There is a typo in JDK 8
-            || strcmp(name, "foward_copy_longs") == 0) {
-        // These are called from arraycopy stub that maintains the regular frame link
-        if (&pc == &this->pc() && withinCurrentStack(fp)) {
-            // Unwind both stub frames for AsyncGetCallTrace
-            sp = fp + 16;
-            fp = ((uintptr_t*)sp)[-2];
-            pc = ((uintptr_t*)sp)[-1] - sizeof(instruction_t);
-        } else {
-            // When cstack=vm, unwind stub frames one by one
-            pc = link();
-        }
-        return true;
     }
     return false;
-}
-
-static inline bool isEntryBarrier(instruction_t* ip) {
-    // ldr  w9, [x28, #32]
-    // cmp  x8, x9
-    return ip[0] == 0xb9402389 && ip[1] == 0xeb09011f;
-}
-
-bool StackFrame::unwindCompiled(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
-    instruction_t* ip = (instruction_t*)pc;
-    instruction_t* entry = (instruction_t*)nm->entry();
-    if ((*ip & 0xffe07fff) == 0xa9007bfd) {
-        // stp  x29, x30, [sp, #offset]
-        // SP has been adjusted, but FP not yet stored in a new frame
-        unsigned int offset = (*ip >> 12) & 0x1f8;
-        sp += offset + 16;
-        pc = link();
-    } else if (ip > entry && ip[0] == 0x910003fd && ip[-1] == 0xa9bf7bfd) {
-        // stp  x29, x30, [sp, #-16]!
-        // mov  x29, sp
-        sp += 16;
-        pc = ((uintptr_t*)sp)[-1];
-    } else if (ip > entry + 3 && !nm->isFrameCompleteAt(ip) &&
-               (isEntryBarrier(ip) || isEntryBarrier(ip + 1))) {
-        // Frame should be complete at this point
-        sp += nm->frameSize() * sizeof(void*);
-        fp = ((uintptr_t*)sp)[-2];
-        pc = ((uintptr_t*)sp)[-1];
-    } else {
-        // Just try
-        pc = link();
-    }
-    return true;
 }
 
 static inline bool isFrameComplete(instruction_t* entry, instruction_t* ip) {
@@ -351,10 +303,6 @@ void StackFrame::adjustSP(const void* entry, const void* pc, uintptr_t& sp) {
         //   add  sp, sp, #0x10
         sp += 16;
     }
-}
-
-bool StackFrame::skipFaultInstruction() {
-    return false;
 }
 
 bool StackFrame::checkInterruptedSyscall() {

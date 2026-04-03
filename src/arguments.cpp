@@ -149,14 +149,11 @@ Error Arguments::parse(const char* args) {
             CASE("dump")
                 _action = ACTION_DUMP;
 
-            CASE("check")
-                _action = ACTION_CHECK;
-
             CASE("status")
                 _action = ACTION_STATUS;
 
-            CASE("meminfo")
-                _action = ACTION_MEMINFO;
+            CASE("metrics")
+                _action = ACTION_METRICS;
 
             CASE("list")
                 _action = ACTION_LIST;
@@ -229,6 +226,8 @@ Error Arguments::parse(const char* args) {
                     if (_nativemem < 0) _nativemem = 0;
                 } else if (strcmp(value, EVENT_LOCK) == 0) {
                     if (_lock < 0) _lock = DEFAULT_LOCK_INTERVAL;
+                } else if (strcmp(value, EVENT_NATIVELOCK) == 0) {
+                    if (_nativelock < 0) _nativelock = DEFAULT_LOCK_INTERVAL;
                 } else if (_event != NULL && !_all) {
                     msg = "Duplicate event argument";
                 } else {
@@ -241,8 +240,7 @@ Error Arguments::parse(const char* args) {
                 }
 
             CASE("loop")
-                _loop = true;
-                if (value == NULL || (_timeout = parseTimeout(value)) == -1) {
+                if (value == NULL || (_loop = parseTimeout(value)) == -1) {
                     msg = "Invalid loop duration";
                 }
 
@@ -250,9 +248,14 @@ Error Arguments::parse(const char* args) {
                 if (value == NULL || (_ttl = parseTimeout(value)) == -1) {
                     msg = "Invalid ttl duration";
                 }
+            CASE("memlimit")
+                _mem_limit = value == NULL ? 0 : parseUnits(value, BYTES);
 
             CASE("alloc")
                 _alloc = value == NULL ? 0 : parseUnits(value, BYTES);
+
+            CASE("tlab")
+                _tlab = true;
 
             CASE("nativemem")
                 _nativemem = value == NULL ? 0 : parseUnits(value, BYTES);
@@ -265,6 +268,9 @@ Error Arguments::parse(const char* args) {
 
             CASE("lock")
                 _lock = value == NULL ? DEFAULT_LOCK_INTERVAL : parseUnits(value, NANOS);
+
+            CASE("nativelock")
+                _nativelock = value == NULL ? DEFAULT_LOCK_INTERVAL : parseUnits(value, NANOS);
 
             CASE("wall")
                 _wall = value == NULL ? 0 : parseUnits(value, NANOS);
@@ -291,6 +297,9 @@ Error Arguments::parse(const char* args) {
                 if (_lock < 0) {
                     _lock = DEFAULT_LOCK_INTERVAL;
                 }
+                if (_nativelock < 0) {
+                    _nativelock = DEFAULT_LOCK_INTERVAL;
+                }
                 if (_nativemem < 0) {
                     _nativemem = DEFAULT_ALLOC_INTERVAL;
                 }
@@ -311,6 +320,9 @@ Error Arguments::parse(const char* args) {
             CASE("jstackdepth")
                 if (value == NULL || (_jstackdepth = atoi(value)) <= 0) {
                     msg = "jstackdepth must be > 0";
+                } else {
+                    char* slash = strchr(value, '/');
+                    _truncated_stack_depth = slash != NULL ? atoi(slash + 1) : _jstackdepth;
                 }
 
             CASE("signal")
@@ -325,23 +337,11 @@ Error Arguments::parse(const char* args) {
                 if (value != NULL) {
                     if (strstr(value, "stats"))    _features.stats = 1;
                     if (strstr(value, "jnienv"))   _features.jnienv = 1;
-                    if (strstr(value, "probesp"))  _features.probe_sp = 1;
                     if (strstr(value, "mixed"))    _features.mixed = 1;
                     if (strstr(value, "vtable"))   _features.vtable_target = 1;
                     if (strstr(value, "comptask")) _features.comp_task = 1;
                     if (strstr(value, "pcaddr"))   _features.pc_addr = 1;
                 }
-
-            CASE("safemode") {
-                // Left for compatibility purpose; will be eventually migrated to 'features'
-                int bits = value == NULL ? INT_MAX : (int)strtol(value, NULL, 0);
-                _features.unknown_java  = (bits & 1) ? 0 : 1;
-                _features.unwind_stub   = (bits & 2) ? 0 : 1;
-                _features.unwind_comp   = (bits & 4) ? 0 : 1;
-                _features.unwind_native = (bits & 8) ? 0 : 1;
-                _features.java_anchor   = (bits & 16) ? 0 : 1;
-                _features.gc_traces     = (bits & 32) ? 0 : 1;
-            }
 
             CASE("file")
                 if (value == NULL || value[0] == 0) {
@@ -408,8 +408,6 @@ Error Arguments::parse(const char* args) {
                         _cstack = CSTACK_FP;
                     } else if (strcmp(value, "dwarf") == 0) {
                         _cstack = CSTACK_DWARF;
-                    } else if (strcmp(value, "lbr") == 0) {
-                        _cstack = CSTACK_LBR;
                     } else if (strcmp(value, "vm") == 0) {
                         _cstack = CSTACK_VM;
                     } else if (strcmp(value, "vmx") == 0) {
@@ -496,7 +494,7 @@ Error Arguments::parse(const char* args) {
         return Error(msg);
     }
 
-    if (_event == NULL && _alloc < 0 && _lock < 0 && _wall < 0 && _nativemem < 0 && _trace.empty()) {
+    if (_event == NULL && _alloc < 0 && _lock < 0 && _wall < 0 && _nativemem < 0 && _nativelock < 0 && _trace.empty()) {
         _event = EVENT_CPU;
     }
 

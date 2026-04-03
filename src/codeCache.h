@@ -7,6 +7,7 @@
 #define _CODECACHE_H
 
 #include <jvmti.h>
+#include "arch.h"
 
 
 #define NO_MIN_ADDRESS  ((const void*)-1)
@@ -20,6 +21,9 @@ enum ImportId {
     im_dlopen,
     im_pthread_create,
     im_pthread_exit,
+    im_pthread_mutex_lock,
+    im_pthread_rwlock_rdlock,
+    im_pthread_rwlock_wrlock,
     im_pthread_setspecific,
     im_poll,
     im_malloc,
@@ -216,6 +220,7 @@ class CodeCacheArray {
   private:
     CodeCache* _libs[MAX_NATIVE_LIBS];
     int _count;
+    size_t _used_memory;
 
   public:
     CodeCacheArray() : _count(0) {
@@ -226,13 +231,18 @@ class CodeCacheArray {
     }
 
     int count() {
-        return __atomic_load_n(&_count, __ATOMIC_ACQUIRE);
+        return loadAcquire(_count);
+    }
+
+    size_t usedMemory() {
+        return _used_memory;
     }
 
     void add(CodeCache* lib) {
-        int index = __atomic_load_n(&_count, __ATOMIC_ACQUIRE);
+        int index = loadAcquire(_count);
         _libs[index] = lib;
-        __atomic_store_n(&_count, index + 1, __ATOMIC_RELEASE);
+        _used_memory += lib->usedMemory();
+        storeRelease(_count, index + 1);
     }
 };
 

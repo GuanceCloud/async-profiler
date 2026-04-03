@@ -4,6 +4,7 @@
  */
 
 #include <pthread.h>
+#include <string.h>
 #include <unistd.h>
 #include "vmStructs.h"
 #include "vmEntry.h"
@@ -36,7 +37,6 @@ int VMStructs::_thread_osthread_offset = -1;
 int VMStructs::_thread_anchor_offset = -1;
 int VMStructs::_thread_state_offset = -1;
 int VMStructs::_thread_vframe_offset = -1;
-int VMStructs::_thread_exception_offset = -1;
 int VMStructs::_osthread_id_offset = -1;
 int VMStructs::_call_wrapper_anchor_offset = -1;
 int VMStructs::_comp_env_offset = -1;
@@ -106,8 +106,8 @@ int VMStructs::_interpreter_frame_bcp_offset = 0;
 unsigned char VMStructs::_unsigned5_base = 0;
 const void** VMStructs::_call_stub_return_addr = NULL;
 const void* VMStructs::_call_stub_return = NULL;
-const void* VMStructs::_interpreted_frame_valid_start = NULL;
-const void* VMStructs::_interpreted_frame_valid_end = NULL;
+const void* VMStructs::_interpreter_start = NULL;
+NMethod* VMStructs::_interpreter_nm = NULL;
 
 jfieldID VMStructs::_eetop;
 jfieldID VMStructs::_tid;
@@ -134,7 +134,6 @@ void VMStructs::init(CodeCache* libjvm) {
     if (libjvm != NULL) {
         _libjvm = libjvm;
         initOffsets();
-        initJvmFunctions();
     }
 }
 
@@ -263,10 +262,6 @@ void VMStructs::initOffsets() {
                     _thread_state_offset = *(int*)(entry + offset_offset);
                 } else if (strcmp(field, "_vframe_array_head") == 0) {
                     _thread_vframe_offset = *(int*)(entry + offset_offset);
-                }
-            } else if (strcmp(type, "ThreadShadow") == 0) {
-                if (strcmp(field, "_exception_file") == 0) {
-                    _thread_exception_offset = *(int*)(entry + offset_offset);
                 }
             } else if (strcmp(type, "OSThread") == 0) {
                 if (strcmp(field, "_thread_id") == 0) {
@@ -484,11 +479,16 @@ void VMStructs::resolveOffsets() {
             && _comp_task_offset >= 0
             && _comp_method_offset >= 0;
 
-    _has_class_loader_data = _class_loader_data_offset >= 0
-            && _class_loader_data_next_offset == sizeof(uintptr_t) * 8 + 8
-            && _methods_offset >= 0
-            && _klass != NULL
-            && _lock_func != NULL && _unlock_func != NULL;
+    if (VM::hotspot_version() == 8) {
+        _lock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor28lock_without_safepoint_checkEv");
+        _unlock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor6unlockEv");
+        _has_class_loader_data = _class_loader_data_offset >= 0
+                && _class_loader_data_next_offset == sizeof(uintptr_t) * 8 + 8
+                && _methods_offset >= 0
+                && _klass != NULL
+                && _lock_func != NULL
+                && _unlock_func != NULL;
+    }
 
 #if defined(__x86_64__) || defined(__i386__)
     _interpreter_frame_bcp_offset = VM::hotspot_version() >= 11 ? -8 : VM::hotspot_version() == 8 ? -7 : 0;
@@ -525,7 +525,6 @@ void VMStructs::resolveOffsets() {
             && _scopes_pcs_offset >= 0
             && ((_mutable_data_offset >= 0 && _relocation_size_offset >= 0) || _nmethod_metadata_offset >= 0)
             && _thread_vframe_offset >= 0
-            && _thread_exception_offset >= 0
             && _constmethod_size >= 0;
 
     // Since JDK-8268406, it is no longer possible to get VMMethod* by dereferencing jmethodID
@@ -555,25 +554,13 @@ void VMStructs::resolveOffsets() {
         _heap_block_used_offset < 0) {
         memset(_code_heap, 0, sizeof(_code_heap));
     }
+    if (_interpreter_nm == NULL && _interpreter_start != NULL) {
+        _interpreter_nm = CodeHeap::findNMethod(_interpreter_start);
+    }
 
     if (_collected_heap_addr != NULL && _collected_heap_reserved_offset >= 0 &&
         _region_start_offset >= 0 && _region_size_offset >= 0) {
         _collected_heap = *_collected_heap_addr + _collected_heap_reserved_offset;
-    }
-}
-
-void VMStructs::initJvmFunctions() {
-    if (VM::hotspot_version() == 8) {
-        _lock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor28lock_without_safepoint_checkEv");
-        _unlock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor6unlockEv");
-    }
-
-    if (VM::hotspot_version() > 0) {
-        CodeBlob* blob = _libjvm->findBlob("_ZNK5frame26is_interpreted_frame_validEP10JavaThread");
-        if (blob != NULL) {
-            _interpreted_frame_valid_start = blob->_start;
-            _interpreted_frame_valid_end = blob->_end;
-        }
     }
 }
 
@@ -629,10 +616,12 @@ void VMStructs::initThreadBridge() {
 
         VMThread* vm_thread = VMThread::fromJavaThread(env, thread);
         if (vm_thread != NULL) {
-            _has_native_thread_id = _thread_osthread_offset >= 0 && _osthread_id_offset >= 0;
             initTLS(vm_thread);
-            _env_offset = (intptr_t)env - (intptr_t)vm_thread;
-            memcpy(_java_thread_vtbl, vm_thread->vtable(), sizeof(_java_thread_vtbl));
+            if (!VM::isZing()) {
+                _has_native_thread_id = _thread_osthread_offset >= 0 && _osthread_id_offset >= 0;
+                _env_offset = (intptr_t)env - (intptr_t)vm_thread;
+                memcpy(_java_thread_vtbl, vm_thread->vtable(), sizeof(_java_thread_vtbl));
+            }
         }
     }
 }

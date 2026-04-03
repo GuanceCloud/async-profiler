@@ -36,7 +36,6 @@ union CallTraceBuffer {
 };
 
 
-class FrameName;
 class NMethod;
 class StackContext;
 
@@ -66,10 +65,9 @@ class Profiler {
     Engine* _alloc_engine;
     int _event_mask;
 
-    bool _in_first_loop;
-    u64 _hung_time;
     u64 _start_time;
     u64 _stop_time;
+    u64 _loop_time;
     int _epoch;
     u32 _gc_id;
     WaitableMutex _timer_lock;
@@ -82,6 +80,7 @@ class Profiler {
     SpinLock _locks[CONCURRENCY_LEVEL];
     CallTraceBuffer* _calltrace_buffer[CONCURRENCY_LEVEL];
     int _max_stack_depth;
+    int _truncated_stack_depth;
     StackWalkFeatures _features;
     CStack _cstack;
     bool _add_event_frame;
@@ -94,8 +93,6 @@ class Profiler {
     SpinLock _stubs_lock;
     CodeCache _runtime_stubs;
     CodeCacheArray _native_libs;
-    const void* _call_stub_begin;
-    const void* _call_stub_end;
 
     // dlopen() hook support
     void** _dlopen_entry;
@@ -114,19 +111,16 @@ class Profiler {
 
     const char* asgctError(int code);
     u32 getLockIndex(int tid);
-    jmethodID getCurrentCompileTask();
-    int getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, StackContext* java_ctx);
-    int getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth, StackContext* java_ctx);
+    int getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, u64* cpu);
+    int getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth);
     int getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int start_depth, int max_depth);
-    void fillFrameTypes(ASGCT_CallFrame* frames, int num_frames, NMethod* nmethod);
     void setThreadInfo(int tid, const char* name, jlong java_thread_id);
     void updateThreadName(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread);
     void updateJavaThreadNames();
     void updateNativeThreadNames();
-    bool excludeTrace(FrameName* fn, CallTrace* trace);
     void mangle(const char* name, char* buf, size_t size);
-    Engine* selectEngine(const char* event_name);
-    Engine* selectAllocEngine(long alloc_interval, bool live);
+    Engine* selectEngine(Arguments& args);
+    Engine* selectAllocEngine(bool tlab);
     Engine* activeEngine();
     Error checkJvmCapabilities();
 
@@ -165,17 +159,15 @@ class Profiler {
         _call_trace_storage(),
         _jfr(),
         _start_time(0),
-        _hung_time(0),
         _epoch(0),
         _gc_id(0),
         _timer_id(NULL),
         _max_stack_depth(0),
+        _truncated_stack_depth(0),
         _thread_events_state(JVMTI_DISABLE),
         _stubs_lock(),
         _runtime_stubs("[stubs]"),
         _native_libs(),
-        _call_stub_begin(NULL),
-        _call_stub_end(NULL),
         _dlopen_entry(NULL) {
 
         for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
@@ -196,15 +188,14 @@ class Profiler {
 
     Error run(Arguments& args);
     Error runInternal(Arguments& args, Writer& out);
-    Error restart(Arguments& args);
+    Error expire(Arguments& args, bool restart);
     void shutdown(Arguments& args);
-    Error check(Arguments& args);
     Error start(Arguments& args, bool reset);
     Error stop(bool restart = false);
     Error flushJfr();
     Error dump(Writer& out, Arguments& args);
-    void printUsedMemory(Writer& out);
     void logStats();
+    void writeMetrics(Writer& out);
     void switchThreadEvents(jvmtiEventMode mode);
     int convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type);
     u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event);
@@ -223,7 +214,6 @@ class Profiler {
     CodeCache* findLibraryByAddress(const void* address);
     const char* findNativeMethod(const void* address);
     CodeBlob* findRuntimeStub(const void* address);
-    bool isAddressInCode(const void* pc);
 
     void trapHandler(int signo, siginfo_t* siginfo, void* ucontext);
     static void crashHandler(int signo, siginfo_t* siginfo, void* ucontext);

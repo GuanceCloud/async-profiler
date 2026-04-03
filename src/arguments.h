@@ -20,6 +20,7 @@ const char* const EVENT_CPU        = "cpu";
 const char* const EVENT_ALLOC      = "alloc";
 const char* const EVENT_NATIVEMEM  = "nativemem";
 const char* const EVENT_LOCK       = "lock";
+const char* const EVENT_NATIVELOCK = "nativelock";
 const char* const EVENT_WALL       = "wall";
 const char* const EVENT_CTIMER     = "ctimer";
 const char* const EVENT_ITIMER     = "itimer";
@@ -32,9 +33,8 @@ enum SHORT_ENUM Action {
     ACTION_RESUME,
     ACTION_STOP,
     ACTION_DUMP,
-    ACTION_CHECK,
     ACTION_STATUS,
-    ACTION_MEMINFO,
+    ACTION_METRICS,
     ACTION_LIST,
     ACTION_VERSION
 };
@@ -60,7 +60,6 @@ enum SHORT_ENUM CStack {
     CSTACK_NO,       // do not collect native frames
     CSTACK_FP,       // walk stack using Frame Pointer links
     CSTACK_DWARF,    // use DWARF unwinding info from .eh_frame section
-    CSTACK_LBR,      // Last Branch Record hardware capability
     CSTACK_VM        // unwind using HotSpot VMStructs
 };
 
@@ -100,30 +99,19 @@ enum EventMask {
     EM_LOCK         = 4,
     EM_WALL         = 8,
     EM_NATIVEMEM    = 16,
-    EM_METHOD_TRACE = 32
+    EM_NATIVELOCK   = 32,
+    EM_METHOD_TRACE = 64
 };
-constexpr int EVENT_MASK_SIZE = 6;
+constexpr int EVENT_MASK_SIZE = 7;
 
 struct StackWalkFeatures {
-    // Deprecated stack recovery techniques used to workaround AsyncGetCallTrace flaws
-    unsigned short unknown_java  : 1;
-    unsigned short unwind_stub   : 1;
-    unsigned short unwind_comp   : 1;
-    unsigned short unwind_native : 1;
-    unsigned short java_anchor   : 1;
-    unsigned short gc_traces     : 1;
-
-    // Common features
-    unsigned short stats         : 1;  // collect stack walking duration statistics
-
-    // Additional HotSpot-specific features
-    unsigned short jnienv        : 1;  // verify JNIEnv* obtained using VMStructs
-    unsigned short probe_sp      : 1;  // when AsyncGetCallTrace fails, adjust SP and retry
-    unsigned short mixed         : 1;  // mixed stack traces with Java and native frames interleaved
-    unsigned short vtable_target : 1;  // show receiver classes of vtable/itable stubs
-    unsigned short comp_task     : 1;  // display current compilation task for JIT threads
-    unsigned short pc_addr       : 1;  // record exact PC address for each sample
-    unsigned short _padding      : 3;  // pad structure to 16 bits
+    unsigned short stats         : 1;   // collect stack walking duration statistics
+    unsigned short jnienv        : 1;   // verify JNIEnv* obtained using VMStructs
+    unsigned short mixed         : 1;   // mixed stack traces with Java and native frames interleaved
+    unsigned short vtable_target : 1;   // show receiver classes of vtable/itable stubs
+    unsigned short comp_task     : 1;   // display current compilation task for JIT threads
+    unsigned short pc_addr       : 1;   // record exact PC address for each sample
+    unsigned short _padding      : 10;  // pad structure to 16 bits
 };
 
 
@@ -174,14 +162,18 @@ class Arguments {
     const char* _event;
     std::vector<const char*> _trace;
     int _timeout;
+    int _loop;
+    size_t _mem_limit;
     long _interval;
     long _alloc;
     long _nativemem;
     long _lock;
+    long _nativelock;
     long _wall;
     long _proc;
     bool _all;
     int _jstackdepth;
+    int _truncated_stack_depth;
     int _signal;
     const char* _file;
     const char* _log;
@@ -199,6 +191,7 @@ class Arguments {
     bool _threads;
     bool _sched;
     bool _record_cpu;
+    bool _tlab;
     bool _live;
     bool _nofree;
     bool _nobatch;
@@ -235,14 +228,18 @@ class Arguments {
         _event(NULL),
         _trace(),
         _timeout(0),
+        _loop(0),
+        _mem_limit(0),
         _interval(0),
         _alloc(-1),
         _nativemem(-1),
         _lock(-1),
+        _nativelock(-1),
         _wall(-1),
         _proc(-1),
         _all(false),
         _jstackdepth(DEFAULT_JSTACKDEPTH),
+        _truncated_stack_depth(DEFAULT_JSTACKDEPTH),
         _signal(0),
         _file(NULL),
         _log(NULL),
@@ -253,13 +250,13 @@ class Arguments {
         _include(),
         _exclude(),
         _mcache(0),
-        _loop(false),
         _ttl(0),
         _preloaded(false),
         _quiet(false),
         _threads(false),
         _sched(false),
         _record_cpu(false),
+        _tlab(false),
         _live(false),
         _nofree(false),
         _nobatch(false),
@@ -269,7 +266,7 @@ class Arguments {
         _fdtransfer_path(NULL),
         _target_cpu(-1),
         _style(0),
-        _features{1, 1, 1, 1, 1, 1},
+        _features{},
         _cstack(CSTACK_DEFAULT),
         _clock(CLK_DEFAULT),
         _output(OUTPUT_NONE),
@@ -300,7 +297,7 @@ class Arguments {
 
     bool hasOutputFile() const {
         return _file != NULL &&
-            (_action == ACTION_STOP || _action == ACTION_DUMP ? _output != OUTPUT_JFR : _action >= ACTION_CHECK);
+            (_action == ACTION_STOP || _action == ACTION_DUMP ? _output != OUTPUT_JFR : _action >= ACTION_STATUS);
     }
 
     bool hasOption(JfrOption option) const {
@@ -308,12 +305,13 @@ class Arguments {
     }
 
     int eventMask() const {
-        return (_event     != NULL ? EM_CPU          : 0) |
-               (_alloc     >= 0    ? EM_ALLOC        : 0) |
-               (_lock      >= 0    ? EM_LOCK         : 0) |
-               (_wall      >= 0    ? EM_WALL         : 0) |
-               (_nativemem >= 0    ? EM_NATIVEMEM    : 0) |
-               (!_trace.empty()    ? EM_METHOD_TRACE : 0);
+        return (_event      != NULL ? EM_CPU          : 0) |
+               (_alloc      >= 0    ? EM_ALLOC        : 0) |
+               (_lock       >= 0    ? EM_LOCK         : 0) |
+               (_wall       >= 0    ? EM_WALL         : 0) |
+               (_nativemem  >= 0    ? EM_NATIVEMEM    : 0) |
+               (_nativelock >= 0    ? EM_NATIVELOCK   : 0) |
+               (!_trace.empty()     ? EM_METHOD_TRACE : 0);
     }
 
     static long parseUnits(const char* str, const Multiplier* multipliers);

@@ -32,7 +32,7 @@ public class CpuTests {
         }
     }
 
-    @Test(mainClass = CpuBurner.class, os = Os.LINUX)
+    @Test(mainClass = CpuBurner.class, os = Os.LINUX, runIsolated = true)
     public void ctimerTotal(TestProcess p) throws Exception {
         Output out = p.profile("-d 2 -e ctimer -i 100ms --total -o collapsed");
         assertCloseTo(out.total(), 2_000_000_000, "ctimer total should match profiling duration");
@@ -41,13 +41,13 @@ public class CpuTests {
         assertCloseTo(out.total(), 2_000_000_000, "ctimer total should not depend on the profiling interval");
     }
 
-    @Test(mainClass = CpuBurner.class)
+    @Test(mainClass = CpuBurner.class, runIsolated = true)
     public void itimerTotal(TestProcess p) throws Exception {
         Output out = p.profile("-d 2 -e itimer -i 100ms --total -o collapsed");
         assertCloseTo(out.total(), 2_000_000_000, "itimer total should match profiling duration");
     }
 
-    @Test(mainClass = CpuBurner.class, os = Os.LINUX)
+    @Test(mainClass = CpuBurner.class, os = Os.LINUX, runIsolated = true)
     public void perfEventsTargetCpuEventsCount(TestProcess p) throws Exception {
         pinCpu(p, 0);
 
@@ -55,9 +55,9 @@ public class CpuTests {
         Assert.isEqual(outWrongCpu.total(), 0, "perf_events total should be 0 when the wrong CPU is targeted");
 
         Output outRightCpu = p.profile("-d 2 -e cpu-clock -i 100ms --total -o collapsed --target-cpu 0");
-        assertCloseTo(outRightCpu.total(), 2_000_000_000, "perf_events total should match profiling duration");
+        Assert.isGreater(outRightCpu.total(), 100_000_000, "perf_events total should accumulate perf counter value");
     }
-    
+
     @Test(mainClass = CpuBurner.class, os = Os.LINUX)
     public void perfEventsRecordCpuEventsCount(TestProcess p) throws Exception {
         pinCpu(p, 1);
@@ -65,9 +65,13 @@ public class CpuTests {
         Output output = p.profile("-d 2 -e cpu-clock -i 100ms --total -o collapsed --record-cpu");
         assert output.contains("\\[CPU-1\\]");
         assert !output.contains("\\[CPU-0\\]");
+
+        output = p.profile("-d 2 -e cpu-clock -i 100ms --total -o collapsed --record-cpu --all-user");
+        assert output.contains("\\[CPU-1\\]");
+        assert !output.contains("\\[CPU-0\\]");
     }
 
-    @Test(mainClass = CpuBurner.class, os = Os.LINUX)
+    @Test(mainClass = CpuBurner.class, os = Os.LINUX, runIsolated = true)
     public void perfEventsTargetCpuWithFdtransferEventsCount(TestProcess p) throws Exception {
         pinCpu(p, 0);
 
@@ -75,7 +79,7 @@ public class CpuTests {
         Assert.isEqual(outWrongCpu.total(), 0, "perf_events total should be 0 when the wrong CPU is targeted");
 
         Output outRightCpu = p.profile("-d 2 -e cpu-clock -i 100ms --total -o collapsed --target-cpu 0 --fdtransfer");
-        assertCloseTo(outRightCpu.total(), 2_000_000_000, "perf_events total should match profiling duration");
+        Assert.isGreater(outRightCpu.total(), 100_000_000, "perf_events total should accumulate perf counter value");
     }
 
     @Test(mainClass = CpuBurner.class, os = Os.LINUX)

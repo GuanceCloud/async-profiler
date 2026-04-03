@@ -20,8 +20,10 @@ class PerfEvents : public CpuEngine {
     static int _max_events;
     static PerfEvent* _events;
     static PerfEventType* _event_type;
+    static int _ioc_enable;
     static bool _alluser;
     static bool _kernel_stack;
+    static bool _use_perf_mmap;
     static bool _record_cpu;
     static int _target_cpu;
 
@@ -33,7 +35,6 @@ class PerfEvents : public CpuEngine {
     void destroyForThread(int tid);
 
   public:
-    Error check(Arguments& args);
     Error start(Arguments& args);
     void stop();
 
@@ -44,7 +45,7 @@ class PerfEvents : public CpuEngine {
     const char* title();
     const char* units();
 
-    static int walk(int tid, void* ucontext, const void** callchain, int max_depth, StackContext* java_ctx);
+    static int walk(int tid, void* ucontext, const void** callchain, int max_depth, u64* cpu);
     static void resetBuffer(int tid);
 
     static bool supported();
@@ -57,15 +58,11 @@ class StackContext;
 
 class PerfEvents : public CpuEngine {
   public:
-    Error check(Arguments& args) {
-        return Error("PerfEvents are not supported on this platform");
-    }
-
     Error start(Arguments& args) {
         return Error("PerfEvents are not supported on this platform");
     }
 
-    static int walk(int tid, void* ucontext, const void** callchain, int max_depth, StackContext* java_ctx) {
+    static int walk(int tid, void* ucontext, const void** callchain, int max_depth, u64* cpu) {
         return 0;
     }
 

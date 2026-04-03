@@ -16,6 +16,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Paths;
 import java.text.ParseException;
 import java.util.StringTokenizer;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * Synchronize async-profiler recording with an existing JFR recording.
@@ -27,7 +28,7 @@ class JfrSync implements FlightRecorderListener {
     private static final int EM_LOCK           = 4;
 
     // Keep in sync with EVENT_MASK_SIZE in C++
-    private static final int EVENT_MASK_SIZE = 6;
+    private static final int EVENT_MASK_SIZE = 7;
 
     // Keep in sync with JfrOption
     private static final int NO_SYSTEM_INFO  = 1;
@@ -77,13 +78,24 @@ class JfrSync implements FlightRecorderListener {
         recording.start();
     }
 
-    public static void stop() {
+    public static boolean stop() {
         Recording recording = masterRecording;
         if (recording != null) {
             // Disable state change notification before stopping
             masterRecording = null;
-            recording.stop();
+            try {
+                recording.stop();
+            } catch (IllegalStateException e) {
+                // Workaround the JDK issue: JFR shutdown hook may stop the recording concurrently
+                // then populate the target file outside the state lock.
+                // Once the file is completely written, the recording state is changed to CLOSED.
+                for (int pause = 10; recording.getState() != RecordingState.CLOSED && pause < 1000; pause *= 2) {
+                    LockSupport.parkNanos(pause * 1_000_000L);
+                }
+                return recording.getState() == RecordingState.CLOSED;
+            }
         }
+        return true;
     }
 
     private static void disableBuiltinEvents(Recording recording, int eventMask) {
@@ -103,6 +115,7 @@ class JfrSync implements FlightRecorderListener {
         }
         // No built-in event related to EM_WALL
         // No built-in event related to EM_NATIVEMEM
+        // No built-in event related to EM_NATIVELOCK
         // No need to disable built-in event related to EM_METHOD_TRACE
 
         eventMask >>>= EVENT_MASK_SIZE;

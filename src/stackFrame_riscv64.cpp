@@ -77,11 +77,6 @@ bool StackFrame::unwindStub(instruction_t* entry, const char* name, uintptr_t& p
     return false;
 }
 
-bool StackFrame::unwindCompiled(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
-    // Not yet implemented
-    return false;
-}
-
 bool StackFrame::unwindPrologue(NMethod* nm, uintptr_t& pc, uintptr_t& sp, uintptr_t& fp) {
     // Not yet implemented
     return false;
@@ -99,10 +94,6 @@ bool StackFrame::unwindAtomicStub(const void*& pc) {
 
 void StackFrame::adjustSP(const void* entry, const void* pc, uintptr_t& sp) {
     // Not yet implemented
-}
-
-bool StackFrame::skipFaultInstruction() {
-    return false;
 }
 
 bool StackFrame::checkInterruptedSyscall() {
