@@ -244,10 +244,6 @@ Error Arguments::parse(const char* args) {
                     msg = "Invalid loop duration";
                 }
 
-            CASE("ttl")
-                if (value == NULL || (_ttl = parseTimeout(value)) == -1) {
-                    msg = "Invalid ttl duration";
-                }
             CASE("memlimit")
                 _mem_limit = value == NULL ? 0 : parseUnits(value, BYTES);
 

@@ -69,8 +69,6 @@ static const char USAGE_STRING[] =
     "                      and for default stacktraces from flamegraph to icicle\n"
     "\n"
     "  --loop time         run profiler in a loop\n"
-    "  --ttl duration      max duration the profiler will run, which enable the profiler\n"
-    "                      auto-stop in the loop (continuous profiling) model\n"
     "  --alloc bytes       allocation profiling interval in bytes\n"
     "  --tlab              use TLAB events for allocation profiling\n"
     "  --live              build allocation profile from live objects only\n"
@@ -531,8 +529,6 @@ int main(int argc, const char** argv) {
             params << "," << (arg.str() + 2) << "=" << args.next();
             if (action == "collect") action = "start";
 
-        } else if (arg == "--ttl") {
-            params << ",ttl=" << args.next();
         } else if (arg == "--libpath") {
             libpath = args.next();
 

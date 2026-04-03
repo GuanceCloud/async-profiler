@@ -1024,6 +1024,7 @@ Error Profiler::start(Arguments& args, bool reset) {
 
     _state = RUNNING;
     _start_time = OS::micros();
+
     _epoch++;
     if (args._timeout != 0 || args._loop != 0 || args._output == OUTPUT_JFR) {
         _loop_time = addTimeout(_start_time, args._loop);
@@ -1643,6 +1644,7 @@ Error Profiler::expire(Arguments& args, bool restart) {
             return error;
         }
     }
+
     if (restart) {
         args._fdtransfer = false;  // keep the previous connection
         args._file_num++;

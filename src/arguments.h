@@ -184,8 +184,6 @@ class Arguments {
     std::vector<const char*> _include;
     std::vector<const char*> _exclude;
     unsigned char _mcache;
-    bool _loop;
-    int _ttl;
     bool _preloaded;
     bool _quiet;
     bool _threads;
@@ -250,7 +248,6 @@ class Arguments {
         _include(),
         _exclude(),
         _mcache(0),
-        _ttl(0),
         _preloaded(false),
         _quiet(false),
         _threads(false),
